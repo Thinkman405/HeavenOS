@@ -1,0 +1,32 @@
+neos/
+├── Cargo.toml                  # Root workspace manifest for the Rust substrate
+├── mkb/                        # Mathematical Knowledge Base (MKB) configuration & definitions
+│   ├── constants.json          # Howard Comma, carrier frequencies, and curvature constants
+│   └── schemas/                # Tetryen node JSON schemas and axiom overrides
+│   └── papers/                 # Foundational theoretical texts & mathematical proofs
+├── substrate/                  # Tier 1: The Rust Hypervisor & Hardware Abstraction
+│   ├── src/
+│   │   ├── main.rs             # Hypervisor entry point and virtual machine bootstrap
+│   │   ├── memory.rs           # Non-Euclidean memory pool management
+│   │   └── translation.rs      # Raw binary-to-wave translation pipelines
+│   └── Cargo.toml
+├── symphony/                   # Tier 2: The Custom DSL & Kernel Logic
+│   ├── compiler/               # Parser and compiler for geometric wave logic
+│   ├── interpreter/            # Executes phase-based conditional branches and bifurcation rules
+│   └── kernel/
+│       ├── scheduler.rs        # Harmonic Force Equilibrium process scheduler
+│       └── quantization.rs     # Howard Comma energy allocation ($E = C_{H}\omega$) and garbage collection
+├── ftg/                        # Fourier Transform Gateway (OSI Model Bridge)
+│   ├── layers_1_2.rs           # Physical & Data Link phase-shift synthesizers & wave-CRC
+│   ├── layers_3_4.rs           # Poincaré disk hyperbolic routing & port overtone multiplexing
+│   └── layer_7.rs              # Application data crystallization (1D/2D text/media to 3D/4D Tetryens)
+├── lattice/                    # Hyperbolic 4D Geometry & Storage Engine
+│   ├── tessellation.rs         # {5, 4} pentagonal lattice mapping
+│   └── metric.rs               # Distance functions ($a \otimes b$ and geodesic distance calculations)
+├── gui/                        # Tetryen Rendering & Fractal UI Engine
+│   ├── renderer.rs             # Curvilinear geometry graphics pipeline
+│   ├── fractal.rs              # Infinite-resolution scaling engine
+│   └── visualization.rs        # Standing wave interference and energy state visualizer
+└── tests/                      # Physics-Based Test-Driven Development (TDD)
+    ├── interference_test.rs    # Phase inversion, destructive teardown, and energy release tests
+    └── bifurcation_test.rs     # Lynchpin multiplicative execution tests ($1 \times 1 = 2$)

@@ -1,0 +1,16 @@
+[package]
+name = "symphony-lang"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+description = "NEOS geometric wave-logic DSL: lexer, parser, interpreter"
+
+[dependencies]
+symphony-kernel = { path = "../kernel" }
+substrate = { path = "../../substrate" }
+lattice = { path = "../../lattice" }
+
+# Physics assertions live at neos/tests/ per _spec/target-tree.md.
+[[test]]
+name = "symphony_lang"
+path = "../../tests/symphony_lang.rs"

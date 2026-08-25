@@ -1,0 +1,36 @@
+[package]
+name = "gui"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+description = "NEOS Tetryen rendering, fractal navigation, and interference visualisation"
+build = "build.rs"
+
+[dependencies]
+lattice = { path = "../lattice" }
+# gui is the presentation layer and sits at the top of the stack: it reads the
+# kernel's load field, the gateway's delivery outcomes, the pool's memory
+# usage, and the crystallisation pipeline's projections. Nothing depends on
+# gui, so these introduce no cycle. substrate and crystallisation were already
+# transitive dependencies (via symphony-kernel/ftg and independently); made
+# direct because gui code now names their types.
+symphony-kernel = { path = "../symphony/kernel" }
+ftg = { path = "../ftg" }
+substrate = { path = "../substrate" }
+crystallisation = { path = "../crystallisation" }
+
+[build-dependencies]
+serde_json = "1"
+
+# Physics assertions live at neos/tests/ per _spec/target-tree.md.
+[[test]]
+name = "gui"
+path = "../tests/gui.rs"
+
+[[test]]
+name = "gui_telemetry"
+path = "../tests/gui_telemetry.rs"
+
+[[test]]
+name = "gui_crystallisation_integration"
+path = "../tests/gui_crystallisation_integration.rs"

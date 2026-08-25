@@ -1,0 +1,74 @@
+---
+type: subsystem
+subsystem: symphony-kernel
+tier: 2
+language: Rust
+stage: 04_implement
+status: complete
+result: "77 tests passing. Quantization, resonance, equilibrium, scheduler policy, deadlock detection, a resource-acquisition tracker feeding the wait-for graph, ConcurrentPool synchronising substrate::MemoryPool, A1/A2 handlers, and all three PRD 3 logic gates (interference, phase shift, scale modulation). Deadlock resolution is deliberately out of scope here — demonstrated in neos/src/main.rs at application level instead, using this crate's own unmodified public API."
+slices: ["quantization + resonance + equilibrium", "scheduler policy + deadlock + axiom handlers", "the three gates", "resource tracker feeding the wait-for graph", "concurrent access to substrate::MemoryPool"]
+prd_sections: ["4"]
+binds_axioms: ["A1", "A2"]
+split_from: symphony
+consumes: [lattice]
+---
+
+# Symphony-kernel — scheduler, quantization, equilibrium
+
+One job: run processes as energy states on a self-stabilising harmonic field, rather than as time-sliced threads on a priority queue.
+
+## The build loop
+
+| Stage | Job | Output |
+|---|---|---|
+| `01_derive` | pull the exact law that binds this subsystem | `math-contract.md` |
+| `02_design` | types and interfaces against that contract | `design.md` |
+| `03_tests` | physics assertions, written before code | `test-plan.md` |
+| `04_implement` | write the Rust into `neos/symphony/kernel/` | `implementation-log.md` |
+
+## Scope
+
+**Owns:** `neos/symphony/kernel/**` — `scheduler.rs`, `quantization.rs`, `equilibrium.rs`
+**PRD sections:** §4 (Kernel and Resource Management)
+**Axioms that bind it:** A1 (process bifurcation, $1\times1=2$), A2 (phase-based branching, no `bool`)
+**Equations that bind it:** Howard Equation; Harmonic Force Equilibrium; Resonance Correction — all in [`_mkb/resonance.md`](../../_mkb/resonance.md)
+**Constants read:** `howard_comma`, `logic_phases`, `resonance.*`
+
+## Consumes `lattice` — does not rebuild it
+
+Core topology and cell naming come from the `lattice` crate: `Tiling`, `Cell::neighbors()`, `CellId`. The `{5,4}` neighbour-naming framework is **already built and tested** there (38 assertions).
+
+**Do not reimplement tiling or neighbour resolution here.** One home per fact applies to code as firmly as to prose. This record maps cores onto cells and reads adjacency; it does not generate geometry.
+
+That is what makes "naming surrounding nodes without runtime discovery overhead" true: adjacency is a closed-form group operation in `lattice`, not a search.
+
+## Four hard constraints
+
+Carried from [reconciliation R5/R6](../../_mkb/reconciliation.md) and non-negotiable:
+
+- **Mean-centre task density.** `Σρᵢ = 0` is the solvability condition for the field equation. Absolute load has no solution.
+- **Derive the coupling from topology.** `α < 2/λ_max(L)`. A hardcoded `α` oscillates at some core count — the thrashing the model exists to prevent.
+- **`ξ(r)` must stay bounded.** It sits in the clock path; an unbounded correction is worse than none.
+- **Deadlock detection is still required.** Load equilibrium eliminates thrashing and bottlenecks, not circular waits on resource acquisition.
+
+## The resource tracker feeds the graph; it does not resolve anything
+
+`WaitForGraph::detect_cycle` only ever sees edges someone else recorded — its own implementation log said so directly: "nothing yet acquires or releases resources." `resources::ResourceTracker::acquire`/`release` is that someone: it tracks which task holds which opaque `ResourceId` and turns acquire/release calls straight into the graph's `add_wait`/`remove_wait` edges, so no caller computes "who holds this" by hand.
+
+Kept strictly on the detection side of the boundary this record has stated from the start (§8 above — deadlock *detection* lives here, *resolution* is explicitly application-level): granting a freed resource to the next queued waiter is bookkeeping the tracker must do to keep the graph *accurate* — a released resource cannot still show a wait edge pointing at its old holder — not deadlock resolution. Nothing here ever breaks a cycle that already exists; a held cycle stays held.
+
+One invariant makes the bookkeeping exact rather than approximate: a task has **at most one outstanding wait edge**, enforced by refusing a second `acquire` on a different resource while one is already pending (`ResourceError::AlreadyWaiting`). Every deadlock the contract names — two locks taken in opposite orders — blocks on exactly one resource at a time, so this is not a restriction beyond what the law requires. It is also what lets `release` retarget every remaining queued waiter's edge from the departing holder to the newly granted one with a plain loop, rather than needing to reason about which of a waiter's several edges is the stale one.
+
+`WaitForGraph` gained one new primitive for this: `remove_wait(waiter, holder)`, deleting exactly that edge rather than every edge the waiter has (`clear_waits`'s job). The distinction never shows up while going through `ResourceTracker` alone — the one-edge invariant means the two are behaviourally identical on every path the tracker exercises — so `remove_wait`'s own contract is asserted directly against `WaitForGraph`, independent of the tracker. See the addendum in the implementation log for how sabotage caught this.
+
+## `ConcurrentPool` — the synchronisation decision `substrate` left open
+
+`substrate::MemoryPool` is deliberately single-threaded; its own implementation log named the two candidate homes for a lock explicitly: "here or in `symphony-kernel`," calling it "a scheduler decision, not a substrate one." `memory::ConcurrentPool` is that decision, made here: one coarse `Mutex<MemoryPool>`, serialising every operation rather than locking per cell. Per-cell locking was considered and rejected — `MemoryPool::allocate` already grows breadth-first over a dynamically discovered set of adjacent cells in one call, and locking that set correctly (consistent order, no holding-while-waiting) would risk reintroducing the exact deadlock class [`deadlock`](../../neos/symphony/kernel/src/deadlock.rs) exists to catch, for a demo-scale pool that doesn't need the throughput.
+
+Verified before trusting it, not assumed: a disposable scratch harness wrapped a raw `MemoryPool` in an `unsafe impl Sync` with zero synchronisation and hammered it with 32 real threads, each writing its own fingerprint byte and reading it back after a forced yield. Unsynchronised: 10/10 runs corrupted. The identical workload through a `Mutex`: 0/10. (The first version of that harness used the *same* fill byte for every thread and looked clean for exactly the wrong reason — an aliased allocation reads back "correctly" if what overwrote it happened to match.)
+
+Building this surfaced a real, load-bearing finding that turned out to have nothing to do with concurrency at all — see [substrate's own addendum](../substrate/04_implement/output/implementation-log.md): `MemoryPool::free` reset a cell's usage unconditionally, corrupting a still-live sibling allocation sharing that cell. Fixed in `substrate`, not here; `ConcurrentPool` only exposed it by being the first caller to actually hammer shared cells hard enough.
+
+## Do not
+
+Load [[symphony-lang]] or other subsystems' records. They don't share state; they share the factory.

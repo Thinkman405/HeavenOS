@@ -1,0 +1,177 @@
+{
+  "$comment": "Authoritative values for NEOS. Prose explanation lives in constants.md - this file is the source of truth for the numbers. Rust builds read this; do not hardcode these values in .rs files. ASCII only: this file is parsed by build.rs and must never carry a BOM or non-ASCII punctuation.",
+  "version": 1,
+  "constants": {
+    "howard_comma": {
+      "symbol": "C_H",
+      "value": 2.6434195357408632e-34,
+      "expression": "h / sqrt(2*pi)",
+      "units": "J*s",
+      "description": "Quantum computational unit. Pairs with ORDINARY frequency nu: E = C_H * nu.",
+      "frequency_variable": "nu",
+      "governs": [
+        "symphony-kernel/quantization",
+        "symphony-kernel/garbage-collection"
+      ],
+      "constraint": "Must be multiplied by ordinary frequency nu, never angular frequency omega. The two differ by 2*pi and nothing in the units catches the mistake.",
+      "$supersedes": "1.0545718e-34 (hbar, paired with omega). Deprecated per reconciliation.md R5a.",
+      "$note": "Neither h nor hbar. The 1/sqrt(2*pi) normalisation is a deliberate departure from Planck, from the hyperbolic-fractal boundary conditions. E = C_H*nu gives 0.3989x the Planck energy h*nu for the same process."
+    },
+    "baseline_carrier_frequency": {
+      "symbol": "omega_c",
+      "value": 6283185307.179586,
+      "expression": "2 * pi * 1e9",
+      "units": "rad/s",
+      "description": "Resting clock synchronization parameter for the Rust hypervisor substrate. 1 GHz harmonic baseline.",
+      "constraint": "ANGULAR frequency. Belongs to wave synthesis. Must never be substituted into E = C_H * nu, which takes ordinary frequency.",
+      "governs": [
+        "substrate/clock",
+        "ftg/layers_1_2"
+      ]
+    },
+    "hyperbolic_curvature": {
+      "symbol": "K",
+      "value": -1.0,
+      "units": "dimensionless",
+      "description": "Negative spatial curvature of the 4D lattice. Standard Lobachevskian hyperbolic plane mapping.",
+      "constraint": "Must remain -1.0 for the Poincare disk distance formula in equations.md to hold as written.",
+      "governs": [
+        "lattice/tessellation",
+        "lattice/metric",
+        "ftg/layers_3_4"
+      ]
+    }
+  },
+  "logic_phases": {
+    "$comment": "Axiom A2 - binary truth values replaced by phase orientation.",
+    "false_equivalent": -1.5707963267948966,
+    "true_equivalent": 1.5707963267948966,
+    "expression": "{-pi/2, +pi/2}"
+  },
+  "thresholds": {
+    "link_stability_phase_variance": {
+      "value": 0.7853981633974483,
+      "expression": "pi/4",
+      "units": "rad",
+      "description": "Phase variance beyond this on an established standing wave triggers automatic phase inversion and teardown."
+    },
+    "teardown_phase_shift": {
+      "value": 3.141592653589793,
+      "expression": "pi",
+      "units": "rad",
+      "description": "Exact phase shift applied for Phase Inversion Teardown (FIN/ACK replacement)."
+    }
+  },
+  "tessellation": {
+    "schlafli": [
+      5,
+      4
+    ],
+    "vertex_degree": 4,
+    "description": "{5,4} pentagonal tessellation of the hyperbolic plane, the storage lattice topology. Schlafli {p,q} = q p-gons meeting at each vertex, so FOUR pentagons per vertex.",
+    "$note": "vACUUM_FLUX.pdf prose says 'five pentagons meet at each vertex', contradicting its own {5,4} notation. Resolved in favour of the notation - see reconciliation.md R3."
+  },
+  "operators": {
+    "$comment": "Reconciled per reconciliation.md R1. Prose in operators.md.",
+    "otimes_scale_lambda": {
+      "symbol": "lambda",
+      "value": 0.881373587019543,
+      "expression": "arcsinh(1) = ln(1 + sqrt(2))",
+      "units": "dimensionless",
+      "description": "Pinned ratio l_P/r for the modified multiplication operator. Chosen so that 1 (x) 1 = 2 holds bit-exactly, since sinh(arcsinh(1)) = 1 identically.",
+      "constraint": "Changing this breaks the axiom 1 (x) 1 = 2. Do not tune."
+    },
+    "otimes_domain_max_product": {
+      "value": 805.5607865456228,
+      "expression": "710 / lambda",
+      "units": "dimensionless",
+      "description": "Hard domain limit: a*b must stay below this or sinh overflows f64 and (x) returns +inf. Enforce with a checked constructor.",
+      "constraint": "Domain constraint, not a tolerance. Must be enforced, not documented."
+    },
+    "associative": false,
+    "distributive": false,
+    "$associativity_note": "At the pinned scale l_P/r = lambda ~ 0.881 (order 1), so the paper's O(l_P^2/r^2) error bound is NOT small. Measured: (2x3)x4 = 2.86e160 while 2x(3x4) overflows. Never reorder (x) chains."
+  },
+  "resonance": {
+    "$comment": "Resolved per reconciliation.md R5/R6. Prose in resonance.md.",
+    "xi_form": {
+      "expression": "xi(r) = sinh(r/R) / ((r/R) * sinh(1)) * exp(1 - r/R)",
+      "description": "Resonance correction factor. Unity at the reference scale r = R, monotonically decreasing, bounded, no singularity at r -> 0.",
+      "$supersedes": "sinh(r/R)*exp(-r/R)/(sinh(1)*exp(-1)) - see reconciliation.md R5b."
+    },
+    "xi_at_reference": {
+      "value": 1.0,
+      "units": "dimensionless",
+      "description": "xi(R) = 1 exactly. A correction factor must be unity at its reference scale or it is a bias.",
+      "constraint": "Any reformulation of xi must preserve this."
+    },
+    "xi_upper_bound": {
+      "value": 2.3130352854993315,
+      "expression": "e / sinh(1)",
+      "units": "dimensionless",
+      "description": "Supremum of xi(r), attained in the limit r -> 0. The correction is bounded and never diverges; worst-case modulation is +131.3%.",
+      "constraint": "Boundedness is a safety property of the clock path. Any reformulation of xi must preserve it.",
+      "$note": "The spec rationale introducing this form states xi(0) = e/sinh(1) ~ 1; it evaluates to 2.3130. The formula satisfies its intended properties regardless, but this is the true ceiling."
+    },
+    "diffusion_stability_factor": {
+      "value": 2.0,
+      "units": "dimensionless",
+      "description": "The numerator in the load-balancer stability bound alpha < 2/lambda_max(L).",
+      "constraint": "Coupling alpha = 1/eps0 must be derived from the core topology's Laplacian spectrum, never hardcoded. Exceeding the bound causes oscillation rather than convergence."
+    }
+  },
+  "scales": {
+    "planck_length": {
+      "symbol": "l_P",
+      "value": 1.616255e-35,
+      "units": "m",
+      "description": "CODATA value. vACUUM_FLUX.pdf quotes the rounded 1.616e-35.",
+      "$note": "Does not enter the (x) operator - only the ratio lambda survives the pinning. Used by the fractal dimension."
+    },
+    "lattice_scale_R": {
+      "symbol": "R",
+      "value": 1.0,
+      "units": "lattice-native",
+      "description": "Lattice-native unit scale. All lattice code works here, giving K = -1/R^2 = -1.",
+      "physical_embedding": 3.6e-10,
+      "physical_embedding_units": "m",
+      "$note": "The 3.6e-10 m figure (superfluid helium interatomic spacing) applies only when embedding into physical space. See reconciliation.md R2."
+    },
+    "fractal_dimension": {
+      "expression": "D(r) = 3 + sin^2(pi * r / l_P)",
+      "range": [
+        3.0,
+        4.0
+      ],
+      "description": "Scale-dependent dimension from Mathematical_Fra.pdf.",
+      "$note": "vACUUM_FLUX.pdf's D ~ 2.32 describes the superfluid embedding, not the abstract lattice, and lies outside this range. See reconciliation.md R4."
+    }
+  },
+  "gates": {
+    "$comment": "Synthesised per gates.md. PRD section 3 names three geometric logic gates; interference was law, the other two are derived there. Prose in gates.md.",
+    "resonance_band": {
+      "value": 0.125,
+      "expression": "(pi/4) / (2*pi) = 1/8",
+      "units": "dimensionless",
+      "description": "Sustained-resonance detuning limit. Two oscillators form a surviving standing wave iff |nu_A - nu_B| / mean(nu_A, nu_B) <= this, where each nu is the scale-corrected effective frequency nu*xi(r).",
+      "derivation": "Relative phase drift over one period of the mean effective frequency is 2*pi*delta_nu/nu_bar. Imposing the link_stability_phase_variance limit of pi/4 gives delta_nu/nu_bar <= 1/8.",
+      "constraint": "Derived, not tuned. It is link_stability_phase_variance divided by 2*pi. Changing either without the other breaks the standing-wave criterion they share.",
+      "governs": [
+        "symphony-lang/gates",
+        "symphony-kernel/resonance"
+      ],
+      "$note": "Relative by derivation, not by choice. Verified boundaries against the reference scale R=1 at 440 Hz: scales beyond r=1.18922 or below r=0.82414 detune; at equal scale the nominal-frequency boundary is a*(17/15)."
+    },
+    "phase_inversion_is_involution": {
+      "value": true,
+      "expression": "phi + pi maps {-pi/2, +pi/2} onto itself",
+      "units": "dimensionless",
+      "description": "A2's two orientations are separated by exactly pi, which is exactly thresholds.teardown_phase_shift. The shift is therefore an involution on the permitted set and the set is closed under it.",
+      "constraint": "The shift value itself lives at thresholds.teardown_phase_shift and is not duplicated here. Do not implement inversion as negation of phi; that coincides numerically only because the set is symmetric about zero.",
+      "governs": [
+        "symphony-lang/gates",
+        "ftg/session"
+      ]
+    }
+  }
+}

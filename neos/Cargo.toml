@@ -1,0 +1,54 @@
+[workspace]
+resolver = "2"
+members = [
+    "lattice",
+    "substrate",
+    "symphony/kernel",
+    "symphony/lang",
+    "ftg",
+    "gui",
+    "crystallisation",
+]
+
+# NEOS — New Earth Operating System
+#
+# Subsystem crates are added here as their subsystems/<name> records reach
+# 04_implement. All seven records are now built.
+#
+# The law this code obeys lives in ../_mkb/. Numeric constants are read from
+# ../_mkb/constants.json at build time and are never retyped into source.
+
+[workspace.package]
+edition = "2021"
+rust-version = "1.75"
+
+# The workspace root is also a package: `neos` itself, the one binary that
+# wires the seven crates into a single boot-to-report run (`cargo run`).
+# Every call it makes is already covered by the subsystem test suites; it
+# composes, it does not add physics.
+[package]
+name = "neos"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+# `tests/` belongs to the other crates' own `[[test]]` targets, each pointing
+# here explicitly. Without this, Cargo auto-discovers every file in it as an
+# integration test of the *new* `neos` package too, which does not depend on
+# `lattice` directly and fails to compile them.
+autotests = false
+
+[dependencies]
+lattice = { path = "lattice" }
+substrate = { path = "substrate" }
+symphony-kernel = { path = "symphony/kernel" }
+symphony-lang = { path = "symphony/lang" }
+ftg = { path = "ftg" }
+crystallisation = { path = "crystallisation" }
+gui = { path = "gui" }
+
+[profile.test]
+# Physics assertions compare floats against closed forms. Optimisation is fine,
+# but fast-math style reassociation would be fatal: the (x) operator is not
+# associative (see _mkb/operators.md), so reordering changes results.
+# rustc does not enable fast-math, and we must never add a flag that does.
+opt-level = 1

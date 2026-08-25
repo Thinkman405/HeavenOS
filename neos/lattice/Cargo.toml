@@ -1,0 +1,27 @@
+[package]
+name = "lattice"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+description = "Hyperbolic 4D geometry and storage engine for NEOS"
+build = "build.rs"
+
+[dependencies]
+
+[build-dependencies]
+serde_json = "1"
+
+# The physics assertions live at neos/tests/ per _spec/target-tree.md, which is
+# outside this package, so the target is declared explicitly rather than
+# discovered. Keeps the spec and the filesystem in agreement.
+[[test]]
+name = "lattice_metric"
+path = "../tests/lattice_metric.rs"
+
+[[test]]
+name = "lattice_tiling"
+path = "../tests/lattice_tiling.rs"
+
+[[test]]
+name = "lattice_addressing"
+path = "../tests/lattice_addressing.rs"

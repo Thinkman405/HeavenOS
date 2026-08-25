@@ -1,0 +1,27 @@
+[package]
+name = "ftg"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+description = "NEOS Fourier Transform Gateway: OSI bridge, hyperbolic routing, connection lifecycle"
+build = "build.rs"
+
+[dependencies]
+lattice = { path = "../lattice" }
+substrate = { path = "../substrate" }
+
+[build-dependencies]
+serde_json = "1"
+
+# Physics assertions live at neos/tests/ per _spec/target-tree.md.
+[[test]]
+name = "ftg"
+path = "../tests/ftg.rs"
+
+[[test]]
+name = "ftg_transport"
+path = "../tests/ftg_transport.rs"
+
+[[test]]
+name = "ftg_session_transport"
+path = "../tests/ftg_session_transport.rs"

@@ -1,0 +1,32 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "NEOS Tetryen Node",
+  "description": "The primitive data unit within the Symphony Layer. Wave attributes, not flat binary values.",
+  "type": "object",
+  "properties": {
+    "node_id": {
+      "type": "string",
+      "description": "Hyperbolic coordinate identifier within the 4D lattice."
+    },
+    "angular_frequency": {
+      "type": "number",
+      "description": "The current omega value dictating computational energy state (E = C_H * omega)."
+    },
+    "phase_shift": {
+      "type": "number",
+      "description": "The current phase angle phi determining logic state and data payload."
+    },
+    "amplitude": {
+      "type": "number",
+      "description": "Structural weight or signal strength (A)."
+    },
+    "harmonics": {
+      "type": "array",
+      "items": {
+        "type": "number"
+      },
+      "description": "Nested overtone frequencies representing sub-directories or multiplexed communication channels."
+    }
+  },
+  "required": ["node_id", "angular_frequency", "phase_shift", "amplitude"]
+}

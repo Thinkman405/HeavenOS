@@ -1,0 +1,40 @@
+name: Release
+
+# Fires on a pushed version tag (v0.1.0, v0.2.0, ...) - the deliberate
+# release boundary product repos pin their HeavenOS submodule to, per the
+# multi-repo strategy: products consume tagged releases, not a moving
+# `main`, so a broken commit here does not immediately surface in every
+# product's Dependabot PRs.
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+env:
+  CARGO_TERM_COLOR: always
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        # The Cargo workspace lives in neos/, not the repo root - same
+        # reason as rust.yml.
+        working-directory: neos
+
+    steps:
+    - uses: actions/checkout@v4
+    - name: Build
+      run: cargo build --verbose --workspace
+    - name: Run tests
+      run: cargo test --verbose --workspace
+    - name: Create GitHub Release
+      working-directory: ${{ github.workspace }}
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: gh release create "${{ github.ref_name }}" --title "${{ github.ref_name }}" --generate-notes

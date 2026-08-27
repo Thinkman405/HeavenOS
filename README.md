@@ -32,6 +32,7 @@ a Rust substrate driven by a quantized harmonic kernel.
 - [Subsystems](#subsystems)
 - [Quickstart](#quickstart)
 - [What `cargo run` actually does](#what-cargo-run-actually-does)
+- [Using HeavenOS in a product](#using-heavenos-in-a-product)
 - [Status](#status)
 - [License](#license)
 
@@ -175,6 +176,29 @@ Not a mock, not a placeholder — one real process:
 - renders the result to a real `.ppm` still and a real animated `.gif`
 
 Full narration of every step: [`CONTEXT.md`](CONTEXT.md#status-is-whatever-exists).
+
+<br>
+
+## Using HeavenOS in a product
+
+`HeavenOS` stays a pure core repo — no product-specific code lands here. Every product built on
+NEOS gets its own repository and pulls this one in as a **git submodule pinned to a tagged
+release** (`v0.1.0`, `v0.2.0`, ...), never to `main` directly, so a product only sees a change here
+once a release says it's ready.
+
+```bash
+git submodule add https://github.com/Thinkman405/HeavenOS.git vendor/heavenos
+cd vendor/heavenos && git checkout v0.1.0 && cd ../..
+git add vendor/heavenos && git commit -m "Add HeavenOS v0.1.0 as a submodule"
+```
+
+Then copy [`_templates/product-repo/dependabot.yml`](_templates/product-repo/dependabot.yml) into
+the product repo's `.github/dependabot.yml`. Dependabot's `gitsubmodule` support already prefers
+the latest *tagged* commit over newer untagged ones with zero extra configuration — it opens a PR
+bumping the submodule pointer every time this repo cuts a new release, gated by the product repo's
+own CI, never a long-lived branch to drift.
+
+Full reasoning and step-by-step: [`_templates/product-repo/CONTEXT.md`](_templates/product-repo/CONTEXT.md).
 
 <br>
 

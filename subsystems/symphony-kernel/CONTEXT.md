@@ -79,6 +79,10 @@ Built to serve [[symphony-lang]]'s stated real limit — `vm::Vm`'s own docs say
 
 **A real deadlock can now really happen, and resolving it needed one new primitive.** `ResourceTracker::resources_held_by(task)` generalises this workspace's existing sequential deadlock demo, which hand-picks "the victim holds exactly this one resource" because it built the scenario itself — a resolver that doesn't know the scenario in advance has to ask what the victim actually holds. `ConcurrentTracker::force_release_all` uses it to release everything at once. Building the real-threads version of the classic two-lock-inversion test surfaced a genuine subtlety a single-thread scenario structurally cannot: after force-releasing the victim's one held resource, the victim's *own thread keeps running* and eventually tries to release that same resource itself — which it no longer holds. The fix is a task written to tolerate `NotHolder` on release, not a change to `ConcurrentTracker`: this is what a task actually built to survive preemption looks like, a distinction that only exists once there is a second thread to preempt.
 
+## A real coverage gap, found from outside this record
+
+`neos/tests/geometric_testbed.rs` (a cross-cutting harness owned by neither `symphony-kernel` nor `ftg` — see root `CONTEXT.md`'s cross-cutting slices) removed `CoreTopology::stability_bound`'s `.max(1)` guard on `d_max` and found this crate's own 79-test suite did not notice: no existing test ever builds a single-core (`CoreTopology::from_tiling(1)`), zero-degree topology, so the resulting division-by-zero (`stability_bound()` returning `inf` instead of a finite bound) went completely unobserved. Caught immediately by the test bed's own explicit degenerate-extreme test. The guard itself was correct and is unchanged; this is a gap in *test coverage*, not a defect in the guard, recorded here rather than silently left for the next person to rediscover.
+
 ## Do not
 
 Load [[symphony-lang]] or other subsystems' records. They don't share state; they share the factory.

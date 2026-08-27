@@ -77,6 +77,10 @@ Two inherited constraints, non-negotiable:
 
 Three concerns, two PRD sections. If `02_design` sprawls, the natural next cut is **transport (§6) vs. session (§7)** — but they share most of their law (carrier synthesis, phase orientation, the standing-wave equations), so splitting early would duplicate contracts rather than separate them.
 
+## A real coverage gap, found from outside this record
+
+`neos/tests/geometric_testbed.rs` (a cross-cutting harness owned by neither `ftg` nor `symphony-kernel` — see root `CONTEXT.md`'s cross-cutting slices) sabotaged `Router::adjacent`'s equality check (`==` flipped to `!=`) and found this crate's own 62-test suite did not notice: the check's one existing caller, `every_hop_crosses_an_edge` in `neos/tests/ftg.rs`, only ever asserted the positive case (a real route hop is adjacent). Under the inversion, `adjacent(a, b)` returns true for nearly any `b` — a cell's five neighbours are almost never all equal to one fixed `b` — so a positive-only check cannot distinguish "correct" from "always true." Fixed in place, in this record's own test, not worked around from outside: `every_hop_crosses_an_edge` now also confirms a same-route pair two hops apart (verified via `bfs_hops`, not assumed) is correctly refused as non-adjacent. Sabotage re-run after the fix: caught immediately.
+
 ## Do not
 
 Load other subsystems' records. They don't share state; they share the factory (`_mkb/`, `_spec/`).

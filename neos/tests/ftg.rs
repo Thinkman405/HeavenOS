@@ -260,7 +260,15 @@ fn any_strict_descent_is_also_optimal() {
     );
 }
 
-/// 2.5 - a route only ever crosses real edges.
+/// 2.5 - a route only ever crosses real edges, and `adjacent` refuses
+/// non-edges too.
+///
+/// The negative half was added after `geometric_testbed.rs` (in `neos/tests`)
+/// sabotaged `adjacent`'s equality check and found this test — checking only
+/// that real hops are confirmed adjacent - still green: with the check
+/// inverted, `adjacent(a, b)` returns true for nearly any `b`, since a cell's
+/// five neighbours are almost never all equal to one fixed `b`. A
+/// positive-only check cannot tell "always true" from "correct".
 #[test]
 fn every_hop_crosses_an_edge() {
     let r = router();
@@ -272,6 +280,20 @@ fn every_hop_crosses_an_edge() {
             "route jumped between non-adjacent cells"
         );
     }
+    let mut checked_negative = 0;
+    for w in path.windows(3) {
+        if r.bfs_hops(w[0], w[2]) != Some(1) {
+            assert!(
+                !r.adjacent(&w[0], &w[2]),
+                "adjacent() wrongly claims two cells two hops apart on the route are neighbors"
+            );
+            checked_negative += 1;
+        }
+    }
+    assert!(
+        checked_negative > 0,
+        "expected at least one real non-adjacent pair along this route"
+    );
 }
 
 /// 2.6 - each hop strictly decreases distance. That is what descent means.

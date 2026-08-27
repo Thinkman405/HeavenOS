@@ -31,10 +31,13 @@ name = "neos"
 version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
-# `tests/` belongs to the other crates' own `[[test]]` targets, each pointing
-# here explicitly. Without this, Cargo auto-discovers every file in it as an
-# integration test of the *new* `neos` package too, which does not depend on
-# `lattice` directly and fails to compile them.
+# `tests/` mostly belongs to the other crates' own `[[test]]` targets, each
+# pointing here explicitly, so this disables auto-discovery of every file in
+# it as an integration test of the *new* `neos` package too. The one
+# legitimate exception is a test that is genuinely cross-subsystem (needs two
+# subsystem crates that don't depend on each other) — `neos` is the only
+# package that legitimately depends on both, so that test is registered below
+# instead of under either subsystem's own crate.
 autotests = false
 
 [dependencies]
@@ -45,6 +48,12 @@ symphony-lang = { path = "symphony/lang" }
 ftg = { path = "ftg" }
 crystallisation = { path = "crystallisation" }
 gui = { path = "gui" }
+
+# Cross-subsystem: needs both `ftg` and `symphony-kernel`, which don't depend
+# on each other, so it can't live under either's own `[[test]]` list.
+[[test]]
+name = "geometric_testbed"
+path = "tests/geometric_testbed.rs"
 
 [profile.test]
 # Physics assertions compare floats against closed forms. Optimisation is fine,

@@ -177,6 +177,117 @@ int main(void) {
     media_ffi_video_result_free(NULL);
     printf("ok:   freeing a NULL video handle does not crash\n");
 
+    /* ==================================================================
+     * The audio bridge — media_ffi_embed_audio and friends.
+     * ================================================================== */
+    {
+        double signal[64];
+        for (size_t i = 0; i < 64; i++) {
+            signal[i] = sin(i * 0.4);
+        }
+        MediaFfiAudioResult *aresult = media_ffi_embed_audio(signal, 64, 3);
+        CHECK(aresult != NULL, "a well-formed signal returns a non-NULL handle");
+        CHECK(media_ffi_audio_result_is_ok(aresult) == 1, "the audio handle reports success");
+
+        size_t anodes = media_ffi_audio_result_node_count(aresult);
+        printf("  audio: %zu phase-space node(s)\n", anodes);
+        CHECK(anodes > 0, "a real signal embeds at least one phase-space node");
+
+        double aout[4] = { -999.0, -999.0, -999.0, -999.0 };
+        int aok = media_ffi_audio_result_node(aresult, 0, aout);
+        CHECK(aok == 1, "reading audio node 0's components succeeds");
+        printf("  audio: node 0 = [%.6f, %.6f, %.6f, %.6f]\n", aout[0], aout[1], aout[2], aout[3]);
+
+        double ajunk[4] = { -1.0, -1.0, -1.0, -1.0 };
+        int aoob = media_ffi_audio_result_node(aresult, 9999, ajunk);
+        CHECK(aoob == 0, "an out-of-range audio node index is refused");
+        CHECK(ajunk[0] == -1.0, "a refused audio read leaves the output buffer untouched");
+
+        media_ffi_audio_result_free(aresult);
+    }
+
+    MediaFfiAudioResult *null_audio = media_ffi_embed_audio(NULL, 64, 3);
+    CHECK(null_audio == NULL, "a NULL signal pointer returns NULL directly");
+
+    {
+        double short_signal[2] = { 1.0, 2.0 };
+        MediaFfiAudioResult *err_audio = media_ffi_embed_audio(short_signal, 2, 10);
+        CHECK(err_audio != NULL, "a too-short signal still returns a valid, freeable handle");
+        CHECK(media_ffi_audio_result_is_ok(err_audio) == 0, "the too-short signal handle correctly reports failure");
+        const char *amsg = media_ffi_audio_result_error_message(err_audio);
+        CHECK(amsg != NULL, "a failed audio handle has a real, non-NULL error message");
+        if (amsg != NULL) {
+            printf("  audio error message: %s\n", amsg);
+        }
+        media_ffi_audio_result_free(err_audio);
+    }
+
+    media_ffi_audio_result_free(NULL);
+    printf("ok:   freeing a NULL audio handle does not crash\n");
+
+    /* ==================================================================
+     * The text bridge — media_ffi_crystallise_text and friends.
+     * ================================================================== */
+    {
+        const char *text = "first\nsecond line\nthird";
+        MediaFfiTextResult *tresult = media_ffi_crystallise_text((const unsigned char *)text, strlen(text));
+        CHECK(tresult != NULL, "a well-formed document returns a non-NULL handle");
+        CHECK(media_ffi_text_result_is_ok(tresult) == 1, "the text handle reports success");
+
+        size_t tnodes = media_ffi_text_result_node_count(tresult);
+        size_t bifurcations = media_ffi_text_result_bifurcations(tresult);
+        double extent = media_ffi_text_result_extent(tresult);
+        printf("  text: %zu node(s), %zu bifurcation(s), extent %.5f\n", tnodes, bifurcations, extent);
+        CHECK(tnodes == 21, "21 non-newline characters in this document");
+        CHECK(bifurcations == 2, "two real line breaks");
+        CHECK(!isnan(extent) && extent > 1.0, "extent grows past 1.0 after real bifurcations");
+
+        unsigned int codepoint = 0;
+        double phase = 0.0;
+        int tok = media_ffi_text_result_node(tresult, 0, &codepoint, &phase);
+        CHECK(tok == 1, "reading text node 0 succeeds");
+        CHECK(codepoint == (unsigned int)'f', "node 0 is the document's first real character, 'f'");
+        printf("  text: node 0 codepoint=%u ('%c'), phase=%.4f\n", codepoint, (char)codepoint, phase);
+
+        unsigned int junk_cp = 999;
+        double junk_ph = -999.0;
+        int toob = media_ffi_text_result_node(tresult, 9999, &junk_cp, &junk_ph);
+        CHECK(toob == 0, "an out-of-range text node index is refused");
+        CHECK(junk_cp == 999 && junk_ph == -999.0, "a refused text read leaves the output untouched");
+
+        media_ffi_text_result_free(tresult);
+    }
+
+    MediaFfiTextResult *null_text = media_ffi_crystallise_text(NULL, 10);
+    CHECK(null_text == NULL, "a NULL text pointer returns NULL directly");
+
+    {
+        /* Five real line breaks — over Crystal::max_bifurcations()'s
+         * ceiling of 3. */
+        const char *deep = "a\na\na\na\na\n";
+        MediaFfiTextResult *err_text = media_ffi_crystallise_text((const unsigned char *)deep, strlen(deep));
+        CHECK(err_text != NULL, "an over-deep document still returns a valid, freeable handle");
+        CHECK(media_ffi_text_result_is_ok(err_text) == 0, "the over-deep document handle correctly reports failure");
+        const char *tmsg = media_ffi_text_result_error_message(err_text);
+        CHECK(tmsg != NULL, "a failed text handle has a real, non-NULL error message");
+        if (tmsg != NULL) {
+            printf("  text error message: %s\n", tmsg);
+        }
+        media_ffi_text_result_free(err_text);
+    }
+
+    {
+        /* A bare UTF-8 continuation byte: invalid on its own. */
+        const unsigned char bad_utf8[] = { 'a', 0x80, 'b' };
+        MediaFfiTextResult *err_utf8 = media_ffi_crystallise_text(bad_utf8, 3);
+        CHECK(err_utf8 != NULL, "invalid UTF-8 still returns a valid, freeable handle");
+        CHECK(media_ffi_text_result_is_ok(err_utf8) == 0, "invalid UTF-8 correctly reports failure, not a crash");
+        media_ffi_text_result_free(err_utf8);
+    }
+
+    media_ffi_text_result_free(NULL);
+    printf("ok:   freeing a NULL text handle does not crash\n");
+
     if (failures == 0) {
         printf("\nALL CHECKS PASSED\n");
         return 0;

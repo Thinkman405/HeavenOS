@@ -122,6 +122,84 @@ double media_ffi_video_result_fundamental_hz(const MediaFfiVideoResult *result);
  * NULL pointer as a no-op. Never call this twice on the same handle. */
 void media_ffi_video_result_free(MediaFfiVideoResult *result);
 
+typedef struct MediaFfiAudioResult MediaFfiAudioResult;
+
+/* Takens-embed a real signal (signal, len samples long) at delay tau.
+ * Returns a valid, freeable handle on both success and crystallisation-
+ * level failure — check media_ffi_audio_result_is_ok() first. Returns
+ * NULL only if signal itself is NULL. */
+MediaFfiAudioResult *media_ffi_embed_audio(const double *signal, size_t len, size_t tau);
+
+/* 1 if result holds a real embedded signal, 0 if it holds an error (or
+ * result itself is NULL). */
+int media_ffi_audio_result_is_ok(const MediaFfiAudioResult *result);
+
+/* The error message as a NUL-terminated string, or NULL if result is ok or
+ * is itself NULL. Borrowed from result — valid until result is freed. */
+const char *media_ffi_audio_result_error_message(const MediaFfiAudioResult *result);
+
+/* How many phase-space nodes result holds — 0 on error or a NULL result. */
+size_t media_ffi_audio_result_node_count(const MediaFfiAudioResult *result);
+
+/* Read one phase-space node's four real components through the output
+ * pointer. Writes out_components[0..4] and returns 1 on success; returns 0
+ * and leaves the output untouched on any failure. out_components must
+ * point to at least 4 writable doubles. */
+int media_ffi_audio_result_node(
+    const MediaFfiAudioResult *result,
+    size_t index,
+    double *out_components
+);
+
+/* Release a handle returned by media_ffi_embed_audio(). Tolerates a NULL
+ * pointer as a no-op. Never call this twice on the same handle. */
+void media_ffi_audio_result_free(MediaFfiAudioResult *result);
+
+typedef struct MediaFfiTextResult MediaFfiTextResult;
+
+/* Crystallise real text (text, len bytes of UTF-8, not NUL-terminated)
+ * through the linguistic pipeline. Returns a valid, freeable handle on
+ * both success and crystallisation-level failure (invalid UTF-8, too many
+ * line breaks) — check media_ffi_text_result_is_ok() first. Returns NULL
+ * only if text itself is NULL. */
+MediaFfiTextResult *media_ffi_crystallise_text(const unsigned char *text, size_t len);
+
+/* 1 if result holds a real crystallised document, 0 if it holds an error
+ * (or result itself is NULL). */
+int media_ffi_text_result_is_ok(const MediaFfiTextResult *result);
+
+/* The error message as a NUL-terminated string, or NULL if result is ok or
+ * is itself NULL. Borrowed from result — valid until result is freed. */
+const char *media_ffi_text_result_error_message(const MediaFfiTextResult *result);
+
+/* How many harmonic nodes (one per non-newline character) result holds —
+ * 0 on error or a NULL result. */
+size_t media_ffi_text_result_node_count(const MediaFfiTextResult *result);
+
+/* Read one harmonic node's Unicode codepoint and phase through the two
+ * output pointers. index is not returned separately — a node's index is
+ * always exactly the index passed in. Writes *out_codepoint/*out_phase and
+ * returns 1 on success; returns 0 and leaves the outputs untouched on any
+ * failure. */
+int media_ffi_text_result_node(
+    const MediaFfiTextResult *result,
+    size_t index,
+    unsigned int *out_codepoint,
+    double *out_phase
+);
+
+/* How many line-break bifurcations result's document had, or 0 on error or
+ * a NULL result. */
+size_t media_ffi_text_result_bifurcations(const MediaFfiTextResult *result);
+
+/* The document's real structural extent after all bifurcations (1.0 for a
+ * single-line document), or NAN if result is NULL/an error. */
+double media_ffi_text_result_extent(const MediaFfiTextResult *result);
+
+/* Release a handle returned by media_ffi_crystallise_text(). Tolerates a
+ * NULL pointer as a no-op. Never call this twice on the same handle. */
+void media_ffi_text_result_free(MediaFfiTextResult *result);
+
 #ifdef __cplusplus
 }
 #endif

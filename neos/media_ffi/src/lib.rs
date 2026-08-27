@@ -82,7 +82,7 @@ use std::ffi::{c_char, CString};
 use std::os::raw::c_int;
 use std::slice;
 
-use crystallisation::{FrequencyMap, PixelGrid, VolumetricTimeCrystal};
+use crystallisation::{takens_embed, Crystal, FrequencyMap, PixelGrid, VolumetricTimeCrystal};
 
 struct FaceSummary {
     energy: f64,
@@ -532,6 +532,352 @@ pub unsafe extern "C" fn media_ffi_video_result_fundamental_hz(result: *const Me
 /// freeing is undefined behaviour this function cannot detect or prevent.
 #[no_mangle]
 pub unsafe extern "C" fn media_ffi_video_result_free(result: *mut MediaFfiVideoResult) {
+    if !result.is_null() {
+        drop(Box::from_raw(result));
+    }
+}
+
+// ============================================================ audio bridge
+//
+// The identical proven shape again, for `crystallisation::takens_embed`.
+// The signal crosses the boundary as a flat `f64` buffer — already the
+// natural shape here, since `takens_embed` itself takes `&[f64]` with no
+// batching/framing to reconcile the way video's frame buffer needed.
+
+struct AudioNode {
+    components: [f64; 4],
+}
+
+/// Opaque across the FFI boundary — see the module docs' safety contract.
+pub struct MediaFfiAudioResult {
+    nodes: Vec<AudioNode>,
+    error: Option<CString>,
+}
+
+impl MediaFfiAudioResult {
+    fn ok(nodes: &[crystallisation::PhaseSpaceVector]) -> Self {
+        Self {
+            nodes: nodes.iter().map(|n| AudioNode { components: *n.components() }).collect(),
+            error: None,
+        }
+    }
+
+    fn err(message: String) -> Self {
+        let error = CString::new(message)
+            .unwrap_or_else(|_| CString::new("crystallisation error (message unrepresentable)").unwrap());
+        Self { nodes: Vec::new(), error: Some(error) }
+    }
+}
+
+fn embed_audio(signal: &[f64], tau: usize) -> MediaFfiAudioResult {
+    match takens_embed(signal, tau) {
+        Ok(nodes) => MediaFfiAudioResult::ok(&nodes),
+        Err(e) => MediaFfiAudioResult::err(e.to_string()),
+    }
+}
+
+/// Takens-embed a real signal (`signal`, `len` samples long) at delay
+/// `tau`, returning an opaque handle.
+///
+/// Returns a valid handle for both success and every `crystallisation`-level
+/// failure — check [`media_ffi_audio_result_is_ok`] first. Returns null
+/// **only** when `signal` itself is null.
+///
+/// # Safety
+/// `signal` must be either null, or point to at least `len` readable
+/// `f64`s for the duration of this call. The returned pointer, if
+/// non-null, must eventually be passed to [`media_ffi_audio_result_free`]
+/// exactly once.
+#[no_mangle]
+pub unsafe extern "C" fn media_ffi_embed_audio(
+    signal: *const f64,
+    len: usize,
+    tau: usize,
+) -> *mut MediaFfiAudioResult {
+    if signal.is_null() {
+        return std::ptr::null_mut();
+    }
+    let slice = if len == 0 { &[] } else { slice::from_raw_parts(signal, len) };
+    let outcome = std::panic::catch_unwind(|| embed_audio(slice, tau)).unwrap_or_else(|payload| {
+        let reason = payload
+            .downcast_ref::<&str>()
+            .map(|s| (*s).to_string())
+            .or_else(|| payload.downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "crystallisation panicked with a non-string payload".to_string());
+        MediaFfiAudioResult::err(format!("internal panic during audio embedding: {reason}"))
+    });
+    Box::into_raw(Box::new(outcome))
+}
+
+/// `1` if `result` holds a real embedded signal, `0` if it holds an error
+/// (or `result` itself is null).
+///
+/// # Safety
+/// `result`, if non-null, must be a handle returned by
+/// [`media_ffi_embed_audio`] and not yet freed.
+#[no_mangle]
+pub unsafe extern "C" fn media_ffi_audio_result_is_ok(result: *const MediaFfiAudioResult) -> c_int {
+    match result.as_ref() {
+        Some(r) => c_int::from(r.error.is_none()),
+        None => 0,
+    }
+}
+
+/// The error message, as a NUL-terminated C string, or null if `result` is
+/// ok or is itself null. Borrowed from `result` — valid until `result` is
+/// freed, never freed separately.
+///
+/// # Safety
+/// `result`, if non-null, must be a handle returned by
+/// [`media_ffi_embed_audio`] and not yet freed.
+#[no_mangle]
+pub unsafe extern "C" fn media_ffi_audio_result_error_message(
+    result: *const MediaFfiAudioResult,
+) -> *const c_char {
+    match result.as_ref().and_then(|r| r.error.as_ref()) {
+        Some(msg) => msg.as_ptr(),
+        None => std::ptr::null(),
+    }
+}
+
+/// How many phase-space nodes `result` holds — `0` on error or a null
+/// `result`.
+///
+/// # Safety
+/// `result`, if non-null, must be a handle returned by
+/// [`media_ffi_embed_audio`] and not yet freed.
+#[no_mangle]
+pub unsafe extern "C" fn media_ffi_audio_result_node_count(result: *const MediaFfiAudioResult) -> usize {
+    result.as_ref().map_or(0, |r| r.nodes.len())
+}
+
+/// Read one phase-space node's four real components through the output
+/// pointer. Writes `out_components[0..4]` and returns `1` on success; on
+/// any failure returns `0` and leaves the output untouched.
+///
+/// # Safety
+/// `result`, if non-null, must be a handle returned by
+/// [`media_ffi_embed_audio`] and not yet freed. `out_components`, if
+/// non-null, must point to at least 4 writable `f64`s.
+#[no_mangle]
+pub unsafe extern "C" fn media_ffi_audio_result_node(
+    result: *const MediaFfiAudioResult,
+    index: usize,
+    out_components: *mut f64,
+) -> c_int {
+    if out_components.is_null() {
+        return 0;
+    }
+    let Some(node) = result.as_ref().and_then(|r| r.nodes.get(index)) else {
+        return 0;
+    };
+    let dst = slice::from_raw_parts_mut(out_components, 4);
+    dst.copy_from_slice(&node.components);
+    1
+}
+
+/// Release a handle returned by [`media_ffi_embed_audio`]. Tolerates a
+/// null pointer as a no-op, matching C's own `free(NULL)` convention.
+///
+/// # Safety
+/// `result` must either be null, or a handle returned by
+/// [`media_ffi_embed_audio`] that has not already been freed — double
+/// freeing is undefined behaviour this function cannot detect or prevent.
+#[no_mangle]
+pub unsafe extern "C" fn media_ffi_audio_result_free(result: *mut MediaFfiAudioResult) {
+    if !result.is_null() {
+        drop(Box::from_raw(result));
+    }
+}
+
+// ============================================================= text bridge
+//
+// The identical proven shape again, for `crystallisation::linguistic::Crystal`.
+// Text crosses the boundary as raw UTF-8 bytes (`*const u8`, `len`), the
+// natural shape for a string across a C ABI — validated with
+// `str::from_utf8` inside the panic-guarded call, since invalid UTF-8 is a
+// real, expected caller error, not something to unwrap and crash on.
+
+struct TextNode {
+    codepoint: u32,
+    phase: f64,
+}
+
+/// Opaque across the FFI boundary — see the module docs' safety contract.
+pub struct MediaFfiTextResult {
+    nodes: Vec<TextNode>,
+    bifurcations: usize,
+    extent: f64,
+    error: Option<CString>,
+}
+
+impl MediaFfiTextResult {
+    fn ok(crystal: &Crystal) -> Self {
+        Self {
+            nodes: crystal
+                .nodes()
+                .iter()
+                .map(|n| TextNode { codepoint: n.codepoint as u32, phase: n.phase })
+                .collect(),
+            bifurcations: crystal.bifurcations(),
+            extent: crystal.extent(),
+            error: None,
+        }
+    }
+
+    fn err(message: String) -> Self {
+        let error = CString::new(message)
+            .unwrap_or_else(|_| CString::new("crystallisation error (message unrepresentable)").unwrap());
+        Self { nodes: Vec::new(), bifurcations: 0, extent: f64::NAN, error: Some(error) }
+    }
+}
+
+fn crystallise_text(text: &[u8]) -> MediaFfiTextResult {
+    match std::str::from_utf8(text) {
+        Ok(s) => match Crystal::crystallise(s) {
+            Ok(c) => MediaFfiTextResult::ok(&c),
+            Err(e) => MediaFfiTextResult::err(e.to_string()),
+        },
+        Err(e) => MediaFfiTextResult::err(format!("input is not valid UTF-8: {e}")),
+    }
+}
+
+/// Crystallise real text (`text`, `len` bytes of UTF-8, not
+/// NUL-terminated) through the linguistic pipeline, returning an opaque
+/// handle.
+///
+/// Returns a valid handle for both success and every `crystallisation`-level
+/// failure (invalid UTF-8, too many line breaks) — check
+/// [`media_ffi_text_result_is_ok`] first. Returns null **only** when
+/// `text` itself is null.
+///
+/// # Safety
+/// `text` must be either null, or point to at least `len` readable bytes
+/// for the duration of this call. The returned pointer, if non-null, must
+/// eventually be passed to [`media_ffi_text_result_free`] exactly once.
+#[no_mangle]
+pub unsafe extern "C" fn media_ffi_crystallise_text(text: *const u8, len: usize) -> *mut MediaFfiTextResult {
+    if text.is_null() {
+        return std::ptr::null_mut();
+    }
+    let slice = if len == 0 { &[] } else { slice::from_raw_parts(text, len) };
+    let outcome = std::panic::catch_unwind(|| crystallise_text(slice)).unwrap_or_else(|payload| {
+        let reason = payload
+            .downcast_ref::<&str>()
+            .map(|s| (*s).to_string())
+            .or_else(|| payload.downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "crystallisation panicked with a non-string payload".to_string());
+        MediaFfiTextResult::err(format!("internal panic during text crystallisation: {reason}"))
+    });
+    Box::into_raw(Box::new(outcome))
+}
+
+/// `1` if `result` holds a real crystallised document, `0` if it holds an
+/// error (or `result` itself is null).
+///
+/// # Safety
+/// `result`, if non-null, must be a handle returned by
+/// [`media_ffi_crystallise_text`] and not yet freed.
+#[no_mangle]
+pub unsafe extern "C" fn media_ffi_text_result_is_ok(result: *const MediaFfiTextResult) -> c_int {
+    match result.as_ref() {
+        Some(r) => c_int::from(r.error.is_none()),
+        None => 0,
+    }
+}
+
+/// The error message, as a NUL-terminated C string, or null if `result` is
+/// ok or is itself null. Borrowed from `result` — valid until `result` is
+/// freed, never freed separately.
+///
+/// # Safety
+/// `result`, if non-null, must be a handle returned by
+/// [`media_ffi_crystallise_text`] and not yet freed.
+#[no_mangle]
+pub unsafe extern "C" fn media_ffi_text_result_error_message(
+    result: *const MediaFfiTextResult,
+) -> *const c_char {
+    match result.as_ref().and_then(|r| r.error.as_ref()) {
+        Some(msg) => msg.as_ptr(),
+        None => std::ptr::null(),
+    }
+}
+
+/// How many harmonic nodes (one per non-newline character) `result` holds
+/// — `0` on error or a null `result`.
+///
+/// # Safety
+/// `result`, if non-null, must be a handle returned by
+/// [`media_ffi_crystallise_text`] and not yet freed.
+#[no_mangle]
+pub unsafe extern "C" fn media_ffi_text_result_node_count(result: *const MediaFfiTextResult) -> usize {
+    result.as_ref().map_or(0, |r| r.nodes.len())
+}
+
+/// Read one harmonic node's Unicode codepoint and phase through the two
+/// output pointers. `index` is not returned separately — a node's index
+/// is always exactly the `index` passed in, since nodes are stored in
+/// sequential order. Writes `*out_codepoint`/`*out_phase` and returns `1`
+/// on success; on any failure returns `0` and leaves the outputs untouched.
+///
+/// # Safety
+/// `result`, if non-null, must be a handle returned by
+/// [`media_ffi_crystallise_text`] and not yet freed. `out_codepoint`/
+/// `out_phase`, if non-null, must each point to writable memory of the
+/// matching type.
+#[no_mangle]
+pub unsafe extern "C" fn media_ffi_text_result_node(
+    result: *const MediaFfiTextResult,
+    index: usize,
+    out_codepoint: *mut u32,
+    out_phase: *mut f64,
+) -> c_int {
+    if out_codepoint.is_null() || out_phase.is_null() {
+        return 0;
+    }
+    let Some(node) = result.as_ref().and_then(|r| r.nodes.get(index)) else {
+        return 0;
+    };
+    *out_codepoint = node.codepoint;
+    *out_phase = node.phase;
+    1
+}
+
+/// How many line-break bifurcations `result`'s document had, or `0` on
+/// error or a null `result`.
+///
+/// # Safety
+/// `result`, if non-null, must be a handle returned by
+/// [`media_ffi_crystallise_text`] and not yet freed.
+#[no_mangle]
+pub unsafe extern "C" fn media_ffi_text_result_bifurcations(result: *const MediaFfiTextResult) -> usize {
+    result.as_ref().map_or(0, |r| r.bifurcations)
+}
+
+/// The document's real structural extent after all bifurcations (`1.0`
+/// for a single-line document), or `NAN` if `result` is null/an error.
+///
+/// # Safety
+/// `result`, if non-null, must be a handle returned by
+/// [`media_ffi_crystallise_text`] and not yet freed.
+#[no_mangle]
+pub unsafe extern "C" fn media_ffi_text_result_extent(result: *const MediaFfiTextResult) -> f64 {
+    match result.as_ref() {
+        Some(r) if r.error.is_none() => r.extent,
+        _ => f64::NAN,
+    }
+}
+
+/// Release a handle returned by [`media_ffi_crystallise_text`]. Tolerates
+/// a null pointer as a no-op, matching C's own `free(NULL)` convention.
+///
+/// # Safety
+/// `result` must either be null, or a handle returned by
+/// [`media_ffi_crystallise_text`] that has not already been freed —
+/// double freeing is undefined behaviour this function cannot detect or
+/// prevent.
+#[no_mangle]
+pub unsafe extern "C" fn media_ffi_text_result_free(result: *mut MediaFfiTextResult) {
     if !result.is_null() {
         drop(Box::from_raw(result));
     }

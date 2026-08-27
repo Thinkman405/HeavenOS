@@ -8,12 +8,17 @@
 //! with MSVC against the built `.dll`/`.lib`, which Rust calling its own
 //! `extern "C"` functions (as every test here does) cannot substitute for.
 
-use crystallisation::{decode_ppm, FrequencyMap, PixelGrid, VolumetricTimeCrystal};
+use crystallisation::{decode_ppm, takens_embed, Crystal, FrequencyMap, PixelGrid, VolumetricTimeCrystal};
 use media_ffi::{
-    media_ffi_crystallise_image, media_ffi_crystallise_video, media_ffi_image_result_coefficient,
-    media_ffi_image_result_coefficient_count, media_ffi_image_result_error_message,
-    media_ffi_image_result_face_count, media_ffi_image_result_face_energy,
-    media_ffi_image_result_free, media_ffi_image_result_is_ok, media_ffi_video_result_error_message,
+    media_ffi_audio_result_error_message, media_ffi_audio_result_free, media_ffi_audio_result_is_ok,
+    media_ffi_audio_result_node, media_ffi_audio_result_node_count, media_ffi_crystallise_image,
+    media_ffi_crystallise_text, media_ffi_crystallise_video, media_ffi_embed_audio,
+    media_ffi_image_result_coefficient, media_ffi_image_result_coefficient_count,
+    media_ffi_image_result_error_message, media_ffi_image_result_face_count,
+    media_ffi_image_result_face_energy, media_ffi_image_result_free, media_ffi_image_result_is_ok,
+    media_ffi_text_result_bifurcations, media_ffi_text_result_error_message,
+    media_ffi_text_result_extent, media_ffi_text_result_free, media_ffi_text_result_is_ok,
+    media_ffi_text_result_node, media_ffi_text_result_node_count, media_ffi_video_result_error_message,
     media_ffi_video_result_free, media_ffi_video_result_fundamental_hz,
     media_ffi_video_result_input_energy, media_ffi_video_result_is_energy_conserving,
     media_ffi_video_result_is_ok, media_ffi_video_result_node, media_ffi_video_result_node_count,
@@ -256,5 +261,176 @@ fn video_out_of_range_node_access_is_refused_not_undefined() {
 fn freeing_a_null_video_handle_does_not_panic() {
     unsafe {
         media_ffi_video_result_free(std::ptr::null_mut());
+    }
+}
+
+// ------------------------------------------------------------------ audio
+
+fn embedded_signal(len: usize) -> Vec<f64> {
+    (0..len).map(|i| (i as f64 * 0.4).sin()).collect()
+}
+
+#[test]
+fn embed_audio_matches_crystallisations_own_pipeline_exactly() {
+    let signal = embedded_signal(64);
+    let tau = 3;
+    let expected = takens_embed(&signal, tau).expect("64 samples embed at tau=3");
+
+    unsafe {
+        let result = media_ffi_embed_audio(signal.as_ptr(), signal.len(), tau);
+        assert!(!result.is_null(), "a well-formed signal must return a handle");
+        assert_eq!(media_ffi_audio_result_is_ok(result), 1);
+        assert_eq!(media_ffi_audio_result_node_count(result), expected.len());
+
+        for (i, node) in expected.iter().enumerate() {
+            let mut out = [0.0; 4];
+            let ok = media_ffi_audio_result_node(result, i, out.as_mut_ptr());
+            assert_eq!(ok, 1, "node {i}: read must succeed");
+            assert_eq!(&out, node.components(), "node {i}: components must match exactly");
+        }
+
+        media_ffi_audio_result_free(result);
+    }
+}
+
+#[test]
+fn a_null_signal_pointer_returns_null_directly() {
+    unsafe {
+        let result = media_ffi_embed_audio(std::ptr::null(), 64, 3);
+        assert!(result.is_null());
+    }
+}
+
+/// A signal too short for the requested `tau` — a real, honest failure
+/// (`takens_embed` needs enough samples to actually form an embedded
+/// vector), not garbage input.
+#[test]
+fn a_signal_too_short_for_tau_reports_a_real_error_not_a_null_handle() {
+    let signal = vec![1.0, 2.0];
+    unsafe {
+        let result = media_ffi_embed_audio(signal.as_ptr(), signal.len(), 10);
+        assert!(!result.is_null(), "an error is still a valid, freeable handle");
+        assert_eq!(media_ffi_audio_result_is_ok(result), 0);
+        assert_eq!(media_ffi_audio_result_node_count(result), 0);
+
+        let msg_ptr = media_ffi_audio_result_error_message(result);
+        assert!(!msg_ptr.is_null());
+        let msg = std::ffi::CStr::from_ptr(msg_ptr).to_str().unwrap();
+        assert!(!msg.is_empty());
+
+        media_ffi_audio_result_free(result);
+    }
+}
+
+#[test]
+fn audio_out_of_range_node_access_is_refused_not_undefined() {
+    let signal = embedded_signal(64);
+    unsafe {
+        let result = media_ffi_embed_audio(signal.as_ptr(), signal.len(), 3);
+        let mut out = [-999.0; 4];
+        let ok = media_ffi_audio_result_node(result, 9_999, out.as_mut_ptr());
+        assert_eq!(ok, 0);
+        assert_eq!(out, [-999.0; 4], "a refused read must not touch the output buffer");
+        media_ffi_audio_result_free(result);
+    }
+}
+
+#[test]
+fn freeing_a_null_audio_handle_does_not_panic() {
+    unsafe {
+        media_ffi_audio_result_free(std::ptr::null_mut());
+    }
+}
+
+// ------------------------------------------------------------------- text
+
+#[test]
+fn crystallise_text_matches_crystallisations_own_pipeline_exactly() {
+    let text = "first\nsecond line\nthird";
+    let expected = Crystal::crystallise(text).expect("well under the four-break ceiling");
+
+    unsafe {
+        let result = media_ffi_crystallise_text(text.as_ptr(), text.len());
+        assert!(!result.is_null(), "a well-formed document must return a handle");
+        assert_eq!(media_ffi_text_result_is_ok(result), 1);
+        assert_eq!(media_ffi_text_result_node_count(result), expected.len());
+        assert_eq!(media_ffi_text_result_bifurcations(result), expected.bifurcations());
+        assert_eq!(media_ffi_text_result_extent(result), expected.extent());
+
+        for (i, node) in expected.nodes().iter().enumerate() {
+            let (mut codepoint, mut phase) = (0u32, 0.0f64);
+            let ok = media_ffi_text_result_node(result, i, &mut codepoint, &mut phase);
+            assert_eq!(ok, 1, "node {i}: read must succeed");
+            assert_eq!(codepoint, node.codepoint as u32, "node {i}: codepoint must match exactly");
+            assert_eq!(phase, node.phase, "node {i}: phase must match exactly");
+        }
+
+        media_ffi_text_result_free(result);
+    }
+}
+
+#[test]
+fn a_null_text_pointer_returns_null_directly() {
+    unsafe {
+        let result = media_ffi_crystallise_text(std::ptr::null(), 10);
+        assert!(result.is_null());
+    }
+}
+
+/// Over the four-real-break ceiling (`Crystal::max_bifurcations() == 3`) —
+/// a real refusal, not truncation.
+#[test]
+fn an_over_deep_document_reports_a_real_error_not_a_null_handle() {
+    let text = "a\n".repeat(4);
+    unsafe {
+        let result = media_ffi_crystallise_text(text.as_ptr(), text.len());
+        assert!(!result.is_null(), "an error is still a valid, freeable handle");
+        assert_eq!(media_ffi_text_result_is_ok(result), 0);
+        assert_eq!(media_ffi_text_result_node_count(result), 0);
+        assert!(media_ffi_text_result_extent(result).is_nan());
+
+        let msg_ptr = media_ffi_text_result_error_message(result);
+        assert!(!msg_ptr.is_null());
+        let msg = std::ffi::CStr::from_ptr(msg_ptr).to_str().unwrap();
+        assert!(!msg.is_empty());
+
+        media_ffi_text_result_free(result);
+    }
+}
+
+/// Invalid UTF-8 is a real, expected caller error at this boundary — the
+/// bridge must report it cleanly, not panic on an internal `str::from_utf8`
+/// unwrap.
+#[test]
+fn invalid_utf8_reports_a_real_error_not_a_panic() {
+    let bytes: [u8; 3] = [b'a', 0x80, b'b']; // 0x80 is a bare continuation byte
+    unsafe {
+        let result = media_ffi_crystallise_text(bytes.as_ptr(), bytes.len());
+        assert!(!result.is_null());
+        assert_eq!(media_ffi_text_result_is_ok(result), 0);
+        let msg_ptr = media_ffi_text_result_error_message(result);
+        assert!(!msg_ptr.is_null());
+        media_ffi_text_result_free(result);
+    }
+}
+
+#[test]
+fn text_out_of_range_node_access_is_refused_not_undefined() {
+    let text = "hello";
+    unsafe {
+        let result = media_ffi_crystallise_text(text.as_ptr(), text.len());
+        let (mut codepoint, mut phase) = (999u32, -999.0f64);
+        let ok = media_ffi_text_result_node(result, 9_999, &mut codepoint, &mut phase);
+        assert_eq!(ok, 0);
+        assert_eq!(codepoint, 999, "a refused read must not touch the output");
+        assert_eq!(phase, -999.0, "a refused read must not touch the output");
+        media_ffi_text_result_free(result);
+    }
+}
+
+#[test]
+fn freeing_a_null_text_handle_does_not_panic() {
+    unsafe {
+        media_ffi_text_result_free(std::ptr::null_mut());
     }
 }

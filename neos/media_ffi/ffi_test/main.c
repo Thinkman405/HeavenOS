@@ -102,6 +102,81 @@ int main(void) {
     media_ffi_image_result_free(NULL);
     printf("ok:   freeing a NULL handle does not crash\n");
 
+    /* ==================================================================
+     * The video bridge — same checks, same shape, a real independent
+     * verification of media_ffi_crystallise_video and friends.
+     * ================================================================== */
+
+    /* A real, quantisable-scale video: 20 frames of a 2x2 grid, amplitude
+     * scaled the way _mkb/timecrystal.md §5.3 requires (2e-8), varying
+     * frame to frame with a real sine so the crystallisation has genuine
+     * structure to find. */
+    {
+        const size_t frame_count = 20, width = 2, height = 2;
+        double frames[20 * 2 * 2];
+        for (size_t i = 0; i < frame_count; i++) {
+            double value = (1.0 + sin(i * 0.3)) * 2.0e-8;
+            for (size_t p = 0; p < width * height; p++) {
+                frames[i * width * height + p] = value;
+            }
+        }
+
+        MediaFfiVideoResult *vresult = media_ffi_crystallise_video(frames, frame_count, width, height, 30.0, 3);
+        CHECK(vresult != NULL, "a well-formed video returns a non-NULL handle");
+        CHECK(media_ffi_video_result_is_ok(vresult) == 1, "the video handle reports success");
+        CHECK(media_ffi_video_result_error_message(vresult) == NULL, "a successful video handle has no error message");
+
+        size_t nodes = media_ffi_video_result_node_count(vresult);
+        printf("  video: %zu phase-space node(s)\n", nodes);
+        CHECK(nodes > 0, "a real varying video embeds at least one phase-space node");
+
+        double energy = media_ffi_video_result_input_energy(vresult);
+        CHECK(!isnan(energy) && energy > 0.0, "the video's input energy is a real, positive number");
+        printf("  video: input energy %.6e J, conserving: %d, fundamental %.4f Hz\n",
+               energy,
+               media_ffi_video_result_is_energy_conserving(vresult),
+               media_ffi_video_result_fundamental_hz(vresult));
+
+        double out[4] = { -999.0, -999.0, -999.0, -999.0 };
+        int ok = media_ffi_video_result_node(vresult, 0, out);
+        CHECK(ok == 1, "reading node 0's components through the output pointer succeeds");
+        printf("  video: node 0 = [%.6f, %.6f, %.6f, %.6f]\n", out[0], out[1], out[2], out[3]);
+
+        double junk[4] = { -1.0, -1.0, -1.0, -1.0 };
+        int oob = media_ffi_video_result_node(vresult, 9999, junk);
+        CHECK(oob == 0, "an out-of-range node index is refused, not read out of bounds");
+        CHECK(junk[0] == -1.0 && junk[1] == -1.0 && junk[2] == -1.0 && junk[3] == -1.0,
+              "a refused video read leaves the output buffer untouched");
+
+        media_ffi_video_result_free(vresult);
+    }
+
+    /* NULL frame buffer. */
+    MediaFfiVideoResult *null_video = media_ffi_crystallise_video(NULL, 20, 2, 2, 30.0, 3);
+    CHECK(null_video == NULL, "a NULL frame buffer returns NULL directly");
+
+    /* A real crystallisation-level failure: real 8-bit-scale pixel values,
+     * never rescaled, overflowing the quantisable ceiling. */
+    {
+        const size_t frame_count = 5, width = 2, height = 2;
+        double bad_frames[5 * 2 * 2];
+        for (size_t i = 0; i < frame_count * width * height; i++) {
+            bad_frames[i] = 128.0;
+        }
+        MediaFfiVideoResult *err_video = media_ffi_crystallise_video(bad_frames, frame_count, width, height, 30.0, 2);
+        CHECK(err_video != NULL, "an unrescaled video still returns a valid, freeable handle");
+        CHECK(media_ffi_video_result_is_ok(err_video) == 0, "the unrescaled video handle correctly reports failure");
+        const char *vmsg = media_ffi_video_result_error_message(err_video);
+        CHECK(vmsg != NULL, "a failed video handle has a real, non-NULL error message");
+        if (vmsg != NULL) {
+            printf("  video error message: %s\n", vmsg);
+        }
+        media_ffi_video_result_free(err_video);
+    }
+
+    media_ffi_video_result_free(NULL);
+    printf("ok:   freeing a NULL video handle does not crash\n");
+
     if (failures == 0) {
         printf("\nALL CHECKS PASSED\n");
         return 0;

@@ -5,17 +5,19 @@
 //!
 //! This is the first pass at the FFI layer this workspace's own plan names
 //! (media framework -> adapter -> C FFI bridge). Rather than expose all four
-//! `crystallisation` pipelines at once, this crate scopes to the holographic
-//! (image) pipeline alone — the same discipline this workspace has followed
-//! at every other layer boundary (`symphony_lang::sandbox` composed exactly
-//! the pieces it needed, not a generalised framework; `crystallisation::parallel`
-//! shipped three near-identical functions rather than one generic batch
-//! abstraction). An FFI boundary is exactly the wrong place to generalise
-//! before the pattern is proven: get the ownership, null-safety, and error
-//! discipline right for one real pipeline, verified against a real,
-//! independently-compiled C program (not just Rust calling its own
-//! `extern "C"` functions, which would not actually prove cross-language
-//! safety) — then repeat the same shape for audio, video, and text.
+//! `crystallisation` pipelines at once, each pipeline gets its own bridge
+//! built and verified in turn — the same discipline this workspace has
+//! followed at every other layer boundary (`symphony_lang::sandbox` composed
+//! exactly the pieces it needed, not a generalised framework;
+//! `crystallisation::parallel` shipped three near-identical functions rather
+//! than one generic batch abstraction). An FFI boundary is exactly the wrong
+//! place to generalise before the pattern is proven: get the ownership,
+//! null-safety, and error discipline right for one real pipeline, verified
+//! against a real, independently-compiled C program (not just Rust calling
+//! its own `extern "C"` functions, which would not actually prove
+//! cross-language safety) — the image bridge went first; the video bridge
+//! (`media_ffi_crystallise_video` and friends, below) repeats the identical
+//! shape for `crystallisation::timecrystal::VolumetricTimeCrystal`.
 //!
 //! # The actual safety contract an FFI crate has to uphold
 //!
@@ -65,14 +67,14 @@
 //!
 //! # What this deliberately does not build yet
 //!
-//! No audio/video/text bridges (same pattern, not yet repeated — see
-//! above). No adapter layer distinct from this crate (the opaque-handle
-//! design above *is* the adapter step this workspace's own plan named,
-//! folded into the bridge rather than a separate crate, since splitting
-//! "translate to FFI-safe shapes" from "expose them as `extern "C"`" into
-//! two crates for one pipeline would be premature). No `cbindgen`-generated
-//! header — `media_ffi.h` is hand-written and verified against this crate's
-//! actual signatures by compiling and running a real, independent C program
+//! No audio/text bridges (same pattern, not yet repeated — see above). No
+//! adapter layer distinct from this crate (the opaque-handle design above
+//! *is* the adapter step this workspace's own plan named, folded into the
+//! bridge rather than a separate crate, since splitting "translate to
+//! FFI-safe shapes" from "expose them as `extern "C"`" into two crates per
+//! pipeline would be premature). No `cbindgen`-generated header —
+//! `media_ffi.h` is hand-written and verified against this crate's actual
+//! signatures by compiling and running a real, independent C program
 //! against it; a real, stated risk of that choice is that the two can drift
 //! if a signature changes here without the header being updated by hand.
 
@@ -80,7 +82,7 @@ use std::ffi::{c_char, CString};
 use std::os::raw::c_int;
 use std::slice;
 
-use crystallisation::{FrequencyMap, PixelGrid};
+use crystallisation::{FrequencyMap, PixelGrid, VolumetricTimeCrystal};
 
 struct FaceSummary {
     energy: f64,
@@ -290,6 +292,246 @@ pub unsafe extern "C" fn media_ffi_image_result_coefficient(
 /// behaviour this function cannot detect or prevent.
 #[no_mangle]
 pub unsafe extern "C" fn media_ffi_image_result_free(result: *mut MediaFfiImageResult) {
+    if !result.is_null() {
+        drop(Box::from_raw(result));
+    }
+}
+
+// ============================================================ video bridge
+//
+// Repeats the image bridge's proven shape exactly for
+// `crystallisation::timecrystal::VolumetricTimeCrystal::crystallise_video`:
+// an opaque handle, never null except for a null input pointer, freed by
+// this crate alone, and the one real-logic call wrapped in
+// `catch_unwind`. The one real design decision specific to video: frames
+// cross the boundary as a single flat, contiguous buffer of
+// `frame_count * width * height` `f64`s (frame-major, then row-major within
+// each frame) rather than an array of per-frame pointers — `crystallise_video`
+// itself is inherently a batch operation (it needs the whole frame
+// sequence's energy time series before any of its FFT/quantisation work can
+// start), so there is no streaming/incremental shape to preserve here; a
+// caller (e.g. a real-time pipeline) is expected to accumulate frames on
+// its own side and call this once it has a full batch, the same way this
+// crate's own `neos/media_ffi/ffi_test` C program will.
+
+struct VideoNode {
+    components: [f64; 4],
+}
+
+/// Opaque across the FFI boundary — see the module docs' safety contract.
+pub struct MediaFfiVideoResult {
+    nodes: Vec<VideoNode>,
+    input_energy: f64,
+    energy_conserving: bool,
+    fundamental_hz: f64,
+    error: Option<CString>,
+}
+
+impl MediaFfiVideoResult {
+    fn ok(vtc: &VolumetricTimeCrystal) -> Self {
+        Self {
+            nodes: vtc
+                .nodes()
+                .iter()
+                .map(|n| VideoNode { components: *n.components() })
+                .collect(),
+            input_energy: vtc.input_energy(),
+            energy_conserving: vtc.is_energy_conserving(),
+            fundamental_hz: vtc.fundamental().get(),
+            error: None,
+        }
+    }
+
+    fn err(message: String) -> Self {
+        let error = CString::new(message)
+            .unwrap_or_else(|_| CString::new("crystallisation error (message unrepresentable)").unwrap());
+        Self {
+            nodes: Vec::new(),
+            input_energy: 0.0,
+            energy_conserving: false,
+            fundamental_hz: 0.0,
+            error: Some(error),
+        }
+    }
+}
+
+fn crystallise_video(frames: &[f64], frame_count: usize, width: usize, height: usize, frame_rate: f64, tau: usize) -> MediaFfiVideoResult {
+    let per_frame = width * height;
+    let mut grids = Vec::with_capacity(frame_count);
+    for chunk in frames.chunks_exact(per_frame).take(frame_count) {
+        match PixelGrid::new(height, width, chunk.to_vec()) {
+            Ok(grid) => grids.push(grid),
+            Err(e) => return MediaFfiVideoResult::err(e.to_string()),
+        }
+    }
+    match VolumetricTimeCrystal::crystallise_video(grids, frame_rate, tau) {
+        Ok(vtc) => MediaFfiVideoResult::ok(&vtc),
+        Err(e) => MediaFfiVideoResult::err(e.to_string()),
+    }
+}
+
+/// Crystallise a real video (a flat buffer of `frame_count * width * height`
+/// pixel values, frame-major then row-major) through the volumetric
+/// time-crystal pipeline, returning an opaque handle.
+///
+/// Returns a valid handle for both success and every `crystallisation`-level
+/// failure — check [`media_ffi_video_result_is_ok`] first. Returns null
+/// **only** when `frames` itself is null.
+///
+/// # Safety
+/// `frames` must be either null, or point to at least
+/// `frame_count * width * height` readable `f64`s for the duration of this
+/// call. The returned pointer, if non-null, must eventually be passed to
+/// [`media_ffi_video_result_free`] exactly once.
+#[no_mangle]
+pub unsafe extern "C" fn media_ffi_crystallise_video(
+    frames: *const f64,
+    frame_count: usize,
+    width: usize,
+    height: usize,
+    frame_rate: f64,
+    tau: usize,
+) -> *mut MediaFfiVideoResult {
+    if frames.is_null() {
+        return std::ptr::null_mut();
+    }
+    let total = frame_count.saturating_mul(width).saturating_mul(height);
+    let slice = if total == 0 { &[] } else { slice::from_raw_parts(frames, total) };
+    let outcome = std::panic::catch_unwind(|| {
+        crystallise_video(slice, frame_count, width, height, frame_rate, tau)
+    })
+    .unwrap_or_else(|payload| {
+        let reason = payload
+            .downcast_ref::<&str>()
+            .map(|s| (*s).to_string())
+            .or_else(|| payload.downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "crystallisation panicked with a non-string payload".to_string());
+        MediaFfiVideoResult::err(format!("internal panic during video crystallisation: {reason}"))
+    });
+    Box::into_raw(Box::new(outcome))
+}
+
+/// `1` if `result` holds a real crystallised video, `0` if it holds an
+/// error (or `result` itself is null).
+///
+/// # Safety
+/// `result`, if non-null, must be a handle returned by
+/// [`media_ffi_crystallise_video`] and not yet freed.
+#[no_mangle]
+pub unsafe extern "C" fn media_ffi_video_result_is_ok(result: *const MediaFfiVideoResult) -> c_int {
+    match result.as_ref() {
+        Some(r) => c_int::from(r.error.is_none()),
+        None => 0,
+    }
+}
+
+/// The error message, as a NUL-terminated C string, or null if `result` is
+/// ok or is itself null. Borrowed from `result` — valid until `result` is
+/// freed, never freed separately.
+///
+/// # Safety
+/// `result`, if non-null, must be a handle returned by
+/// [`media_ffi_crystallise_video`] and not yet freed.
+#[no_mangle]
+pub unsafe extern "C" fn media_ffi_video_result_error_message(
+    result: *const MediaFfiVideoResult,
+) -> *const c_char {
+    match result.as_ref().and_then(|r| r.error.as_ref()) {
+        Some(msg) => msg.as_ptr(),
+        None => std::ptr::null(),
+    }
+}
+
+/// How many phase-space nodes `result` holds — `0` on error or a null
+/// `result`.
+///
+/// # Safety
+/// `result`, if non-null, must be a handle returned by
+/// [`media_ffi_crystallise_video`] and not yet freed.
+#[no_mangle]
+pub unsafe extern "C" fn media_ffi_video_result_node_count(result: *const MediaFfiVideoResult) -> usize {
+    result.as_ref().map_or(0, |r| r.nodes.len())
+}
+
+/// Read one phase-space node's four real components through the output
+/// pointer. Writes `out_components[0..4]` and returns `1` on success; on
+/// any failure (`result` null/an error, `index` out of range, or
+/// `out_components` null) returns `0` and leaves the output untouched.
+///
+/// # Safety
+/// `result`, if non-null, must be a handle returned by
+/// [`media_ffi_crystallise_video`] and not yet freed. `out_components`, if
+/// non-null, must point to at least 4 writable `f64`s.
+#[no_mangle]
+pub unsafe extern "C" fn media_ffi_video_result_node(
+    result: *const MediaFfiVideoResult,
+    index: usize,
+    out_components: *mut f64,
+) -> c_int {
+    if out_components.is_null() {
+        return 0;
+    }
+    let Some(node) = result.as_ref().and_then(|r| r.nodes.get(index)) else {
+        return 0;
+    };
+    let dst = slice::from_raw_parts_mut(out_components, 4);
+    dst.copy_from_slice(&node.components);
+    1
+}
+
+/// The video's real input energy (Joules), or `NAN` if `result` is
+/// null/an error.
+///
+/// # Safety
+/// `result`, if non-null, must be a handle returned by
+/// [`media_ffi_crystallise_video`] and not yet freed.
+#[no_mangle]
+pub unsafe extern "C" fn media_ffi_video_result_input_energy(result: *const MediaFfiVideoResult) -> f64 {
+    match result.as_ref() {
+        Some(r) if r.error.is_none() => r.input_energy,
+        _ => f64::NAN,
+    }
+}
+
+/// `1` if the crystallisation conserved energy within the half-quantum
+/// floor, `0` otherwise (including a null/error `result`).
+///
+/// # Safety
+/// `result`, if non-null, must be a handle returned by
+/// [`media_ffi_crystallise_video`] and not yet freed.
+#[no_mangle]
+pub unsafe extern "C" fn media_ffi_video_result_is_energy_conserving(
+    result: *const MediaFfiVideoResult,
+) -> c_int {
+    match result.as_ref() {
+        Some(r) if r.error.is_none() => c_int::from(r.energy_conserving),
+        _ => 0,
+    }
+}
+
+/// The video's real, Howard-Comma-quantised fundamental frequency (Hz), or
+/// `NAN` if `result` is null/an error.
+///
+/// # Safety
+/// `result`, if non-null, must be a handle returned by
+/// [`media_ffi_crystallise_video`] and not yet freed.
+#[no_mangle]
+pub unsafe extern "C" fn media_ffi_video_result_fundamental_hz(result: *const MediaFfiVideoResult) -> f64 {
+    match result.as_ref() {
+        Some(r) if r.error.is_none() => r.fundamental_hz,
+        _ => f64::NAN,
+    }
+}
+
+/// Release a handle returned by [`media_ffi_crystallise_video`]. Tolerates
+/// a null pointer as a no-op, matching C's own `free(NULL)` convention.
+///
+/// # Safety
+/// `result` must either be null, or a handle returned by
+/// [`media_ffi_crystallise_video`] that has not already been freed — double
+/// freeing is undefined behaviour this function cannot detect or prevent.
+#[no_mangle]
+pub unsafe extern "C" fn media_ffi_video_result_free(result: *mut MediaFfiVideoResult) {
     if !result.is_null() {
         drop(Box::from_raw(result));
     }

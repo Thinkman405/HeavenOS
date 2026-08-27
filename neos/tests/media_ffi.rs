@@ -8,12 +8,15 @@
 //! with MSVC against the built `.dll`/`.lib`, which Rust calling its own
 //! `extern "C"` functions (as every test here does) cannot substitute for.
 
-use crystallisation::{decode_ppm, FrequencyMap};
+use crystallisation::{decode_ppm, FrequencyMap, PixelGrid, VolumetricTimeCrystal};
 use media_ffi::{
-    media_ffi_crystallise_image, media_ffi_image_result_coefficient,
+    media_ffi_crystallise_image, media_ffi_crystallise_video, media_ffi_image_result_coefficient,
     media_ffi_image_result_coefficient_count, media_ffi_image_result_error_message,
     media_ffi_image_result_face_count, media_ffi_image_result_face_energy,
-    media_ffi_image_result_free, media_ffi_image_result_is_ok,
+    media_ffi_image_result_free, media_ffi_image_result_is_ok, media_ffi_video_result_error_message,
+    media_ffi_video_result_free, media_ffi_video_result_fundamental_hz,
+    media_ffi_video_result_input_energy, media_ffi_video_result_is_energy_conserving,
+    media_ffi_video_result_is_ok, media_ffi_video_result_node, media_ffi_video_result_node_count,
 };
 
 /// Identical to `neos/src/main.rs`'s own `embedded_ppm()`.
@@ -140,5 +143,118 @@ fn accessors_on_a_null_result_are_defensive_not_undefined() {
         assert_eq!(ok, 0);
         assert_eq!(re, -1.0);
         assert_eq!(im, -1.0);
+    }
+}
+
+// ------------------------------------------------------------------ video
+
+/// Same scale `tests/crystallisation_codec.rs`'s own `quantisable_frame`
+/// uses — a realistic 8-bit-scale frame overflows the Howard-Comma
+/// quantisable ceiling long before a video's worth of frames finishes.
+const QUANTISABLE_AMPLITUDE: f64 = 2.0e-8;
+
+fn quantisable_value(i: usize) -> f64 {
+    (1.0 + (i as f64 * 0.3).sin()) * QUANTISABLE_AMPLITUDE
+}
+
+/// The exact flat, frame-major/row-major buffer `media_ffi_crystallise_video`
+/// expects.
+fn quantisable_video_buffer(frame_count: usize, width: usize, height: usize) -> Vec<f64> {
+    let mut buf = Vec::with_capacity(frame_count * width * height);
+    for i in 0..frame_count {
+        buf.extend(std::iter::repeat(quantisable_value(i)).take(width * height));
+    }
+    buf
+}
+
+/// The identical video, built the way `crystallisation`'s own API expects,
+/// for the bit-for-bit cross-check.
+fn quantisable_video_frames(frame_count: usize, width: usize, height: usize) -> Vec<PixelGrid> {
+    (0..frame_count)
+        .map(|i| PixelGrid::new(height, width, vec![quantisable_value(i); width * height]).unwrap())
+        .collect()
+}
+
+#[test]
+fn crystallise_video_matches_crystallisations_own_pipeline_exactly() {
+    let (frame_count, width, height, frame_rate, tau) = (20usize, 2usize, 2usize, 30.0, 3usize);
+    let buffer = quantisable_video_buffer(frame_count, width, height);
+    let frames = quantisable_video_frames(frame_count, width, height);
+    let expected = VolumetricTimeCrystal::crystallise_video(frames, frame_rate, tau)
+        .expect("a real, quantisable-scale video crystallises");
+
+    unsafe {
+        let result = media_ffi_crystallise_video(buffer.as_ptr(), frame_count, width, height, frame_rate, tau);
+        assert!(!result.is_null(), "a well-formed video must return a handle");
+        assert_eq!(media_ffi_video_result_is_ok(result), 1);
+
+        assert_eq!(media_ffi_video_result_node_count(result), expected.nodes().len());
+        assert_eq!(media_ffi_video_result_input_energy(result), expected.input_energy());
+        assert_eq!(
+            media_ffi_video_result_is_energy_conserving(result),
+            if expected.is_energy_conserving() { 1 } else { 0 }
+        );
+        assert_eq!(media_ffi_video_result_fundamental_hz(result), expected.fundamental().get());
+
+        for (i, node) in expected.nodes().iter().enumerate() {
+            let mut out = [0.0; 4];
+            let ok = media_ffi_video_result_node(result, i, out.as_mut_ptr());
+            assert_eq!(ok, 1, "node {i}: read must succeed");
+            assert_eq!(&out, node.components(), "node {i}: components must match exactly");
+        }
+
+        media_ffi_video_result_free(result);
+    }
+}
+
+#[test]
+fn a_null_frame_buffer_returns_null_directly() {
+    unsafe {
+        let result = media_ffi_crystallise_video(std::ptr::null(), 20, 2, 2, 30.0, 3);
+        assert!(result.is_null());
+    }
+}
+
+/// Real 8-bit-scale pixel values (never rescaled, per
+/// `_mkb/timecrystal.md` §5.3), not garbage bytes — the same kind of
+/// honest, real-world failure `crystallisation_codec.rs`'s own
+/// `realistic_frame` exercises.
+#[test]
+fn an_unrescaled_video_reports_a_real_error_not_a_null_handle() {
+    let (frame_count, width, height) = (5usize, 2usize, 2usize);
+    let buffer = vec![128.0; frame_count * width * height];
+    unsafe {
+        let result = media_ffi_crystallise_video(buffer.as_ptr(), frame_count, width, height, 30.0, 2);
+        assert!(!result.is_null(), "an error is still a valid, freeable handle");
+        assert_eq!(media_ffi_video_result_is_ok(result), 0);
+        assert_eq!(media_ffi_video_result_node_count(result), 0);
+
+        let msg_ptr = media_ffi_video_result_error_message(result);
+        assert!(!msg_ptr.is_null());
+        let msg = std::ffi::CStr::from_ptr(msg_ptr).to_str().unwrap();
+        assert!(!msg.is_empty());
+
+        media_ffi_video_result_free(result);
+    }
+}
+
+#[test]
+fn video_out_of_range_node_access_is_refused_not_undefined() {
+    let (frame_count, width, height, frame_rate, tau) = (20usize, 2usize, 2usize, 30.0, 3usize);
+    let buffer = quantisable_video_buffer(frame_count, width, height);
+    unsafe {
+        let result = media_ffi_crystallise_video(buffer.as_ptr(), frame_count, width, height, frame_rate, tau);
+        let mut out = [-999.0; 4];
+        let ok = media_ffi_video_result_node(result, 9_999, out.as_mut_ptr());
+        assert_eq!(ok, 0);
+        assert_eq!(out, [-999.0; 4], "a refused read must not touch the output buffer");
+        media_ffi_video_result_free(result);
+    }
+}
+
+#[test]
+fn freeing_a_null_video_handle_does_not_panic() {
+    unsafe {
+        media_ffi_video_result_free(std::ptr::null_mut());
     }
 }

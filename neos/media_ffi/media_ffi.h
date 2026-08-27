@@ -67,6 +67,61 @@ int media_ffi_image_result_coefficient(
  * twice on the same handle. */
 void media_ffi_image_result_free(MediaFfiImageResult *result);
 
+typedef struct MediaFfiVideoResult MediaFfiVideoResult;
+
+/* Crystallise a real video through the volumetric time-crystal pipeline.
+ * frames is a flat buffer of frame_count * width * height pixel values,
+ * frame-major then row-major. Returns a valid, freeable handle on both
+ * success and crystallisation-level failure — check
+ * media_ffi_video_result_is_ok() first. Returns NULL only if frames itself
+ * is NULL. */
+MediaFfiVideoResult *media_ffi_crystallise_video(
+    const double *frames,
+    size_t frame_count,
+    size_t width,
+    size_t height,
+    double frame_rate,
+    size_t tau
+);
+
+/* 1 if result holds a real crystallised video, 0 if it holds an error (or
+ * result itself is NULL). */
+int media_ffi_video_result_is_ok(const MediaFfiVideoResult *result);
+
+/* The error message as a NUL-terminated string, or NULL if result is ok or
+ * is itself NULL. Borrowed from result — valid until result is freed, never
+ * freed separately. */
+const char *media_ffi_video_result_error_message(const MediaFfiVideoResult *result);
+
+/* How many phase-space nodes result holds — 0 on error or a NULL result. */
+size_t media_ffi_video_result_node_count(const MediaFfiVideoResult *result);
+
+/* Read one phase-space node's four real components through the output
+ * pointer. Writes out_components[0..4] and returns 1 on success; returns 0
+ * and leaves the output untouched on any failure. out_components must
+ * point to at least 4 writable doubles. */
+int media_ffi_video_result_node(
+    const MediaFfiVideoResult *result,
+    size_t index,
+    double *out_components
+);
+
+/* The video's real input energy (Joules), or NAN if result is NULL/an
+ * error. */
+double media_ffi_video_result_input_energy(const MediaFfiVideoResult *result);
+
+/* 1 if the crystallisation conserved energy within the half-quantum floor,
+ * 0 otherwise (including a NULL/error result). */
+int media_ffi_video_result_is_energy_conserving(const MediaFfiVideoResult *result);
+
+/* The video's real, Howard-Comma-quantised fundamental frequency (Hz), or
+ * NAN if result is NULL/an error. */
+double media_ffi_video_result_fundamental_hz(const MediaFfiVideoResult *result);
+
+/* Release a handle returned by media_ffi_crystallise_video(). Tolerates a
+ * NULL pointer as a no-op. Never call this twice on the same handle. */
+void media_ffi_video_result_free(MediaFfiVideoResult *result);
+
 #ifdef __cplusplus
 }
 #endif

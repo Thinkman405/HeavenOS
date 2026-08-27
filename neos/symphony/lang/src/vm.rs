@@ -223,9 +223,9 @@ pub struct ProgramOutcome {
 /// little-endian — a straight byte round-trip with no arithmetic performed
 /// on the stored value, so reconstruction is bit-exact by construction. See
 /// `_mkb/instruction_set.md`'s "What STORE/LOAD deliberately are not".
-const STATE_BYTES: usize = 24;
+pub(crate) const STATE_BYTES: usize = 24;
 
-fn encode_state(task: &RuntimeTask) -> Vec<u8> {
+pub(crate) fn encode_state(task: &RuntimeTask) -> Vec<u8> {
     let mut bytes = Vec::with_capacity(STATE_BYTES);
     bytes.extend_from_slice(&task.frequency().to_le_bytes());
     bytes.extend_from_slice(&task.guard_phase().radians().to_le_bytes());
@@ -233,7 +233,7 @@ fn encode_state(task: &RuntimeTask) -> Vec<u8> {
     bytes
 }
 
-fn decode_state(bytes: &[u8]) -> Option<(f64, f64, f64)> {
+pub(crate) fn decode_state(bytes: &[u8]) -> Option<(f64, f64, f64)> {
     if bytes.len() < STATE_BYTES {
         return None;
     }

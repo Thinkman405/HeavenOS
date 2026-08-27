@@ -4,7 +4,7 @@ subsystem: symphony-lang
 stage: 04_implement
 status: complete
 toolchain: rustc 1.97.1 / cargo 1.97.1
-result: 69 passed, 0 failed (448 workspace-wide) — see instruction-executing state machine addendum
+result: 72 passed, 0 failed (453 workspace-wide) — see instruction-executing state machine addendum
 consumes: [symphony-kernel, substrate, lattice]
 ---
 
@@ -476,3 +476,39 @@ Both reverted after confirming; full suite re-confirmed at 69/69, 448/448 worksp
 ## Human check
 
 Read "What 'reserved' actually protects, and why the check sits where it does" alongside `reservation_applies_to_path_addresses_too` — the design claim (checked at the resolved address, not the source syntax) and its test are the same claim stated two ways. Then read the two-sabotage table above: testing only "disabled" would have left an inverted, backwards check equally green, since both mutations remove the *distinguishing* behaviour a privilege boundary exists for.
+
+---
+
+# Addendum — real concurrency (`concurrent::run_program`/`run_batch_concurrent`)
+
+```
+cargo build --workspace  → Finished, no warnings
+cargo test  --workspace  → 453 passed; 0 failed
+cargo test  -p symphony-lang → 72 passed
+```
+
+Workspace total: **448 → 453**. `symphony_lang` 69 → 72. `symphony_kernel`/`symphony_scheduler` also gained tests — see that subsystem's own log for `ConcurrentTracker`.
+
+Unlike Phase 4's privilege domains, this closes by **composing**, not by stated convention. `run_program_trapped`'s own doc already named the gap precisely: *"there is no scheduler able to suspend a blocked program and resume it once the holder releases."* `symphony_kernel::ConcurrentTracker` is that scheduler — real `Mutex`+`Condvar` around the *unchanged* `ResourceTracker`/`WaitForGraph`, the resource-side sibling of the already-real `ConcurrentPool`.
+
+## Why a second dispatch loop, argued once more
+
+`Vm<'a>` borrows its pool/tracker/graph exclusively for a run's lifetime — correct for one thread owning them, incompatible with several real threads sharing them at the same instant. Rather than rebuild `Vm` around `Arc`'d fields (forcing every existing sequential caller to change), `concurrent::run_program` is a second, independent dispatch loop against `Arc<ConcurrentPool>`/`Arc<ConcurrentTracker>` — mechanically the same instruction interpretation, ported rather than reinvented, with two real differences: `store`/`load` call the already-thread-safe `ConcurrentPool` (which gained two small passthroughs, `address_at`/`resolve_path`, so curved and path addressing work identically to the sequential path), and `acquire` calls `blocking_acquire`, which suspends the calling OS thread instead of returning `VmFault::Blocked`. `vm::Vm` and all 69 of its existing tests are untouched — this is pure addition, not a modification of proven code.
+
+## Verified as a real wait, not inferred
+
+`blocking_acquire_really_suspends_the_calling_thread_until_released` (in `symphony_kernel`'s own test file, since the primitive lives there) holds a resource for a measured 150ms on one thread and times a second thread's `blocking_acquire` call for the same resource — it must take at least that long, not microseconds. The language-level `real_threads_serialize_correctly_under_a_shared_resource` test then proves the same guarantee end-to-end through `symphony-lang` source: 8 real threads each `acquire` one resource, `store` a distinct frequency into the *same* cell, and `load` it straight back — if the critical section were not real, at least one thread would read another's value. Both are the direct descendants of `ConcurrentPool`'s own original verification method (distinct fingerprint per thread, read back, must match), applied to a different primitive.
+
+## A real deadlock, and a bug real threads can have that a hand-sequenced scenario cannot
+
+Detailed fully in `symphony_kernel`'s own log (`ConcurrentTracker::force_release_all`/`resources_held_by`); the language-level consequence: the first version of `two_real_threads_deadlock_and_the_watchdog_resolves_it` (originally written directly against `ConcurrentTracker`, not through `symphony-lang` source, since the scenario needs precise timing the DSL has no `sleep` instruction for) hung on its very first run. The cause was a genuine subtlety, not a tracker bug: after the watchdog force-releases the victim's one held fork, the victim's *own thread keeps executing* and eventually reaches its own `release` call for a fork it no longer holds — `NotHolder`, and the test's own `.unwrap()` turned that into a panic that stalled `join()` forever. Fixed by having each philosopher tolerate `NotHolder` on release rather than unwrap it — the shape of a task actually built to survive preemption. Caught by running the test with a bounded external timeout and inspecting the hang directly, not by reasoning about it in the abstract.
+
+## Doctrine checks — see `symphony_kernel`'s own log for the tracker-level sabotage (condvar wait removed, `resources_held_by` zeroed); one language-level consequence is worth restating here: removing the condvar wait entirely made `real_threads_serialize_correctly_under_a_shared_resource` observe **actual cross-thread interleaving corruption** — a thread reading back a different thread's just-written frequency — which is the sharpest possible confirmation that the mutual exclusion this test relies on is load-bearing, not decorative.
+
+## Wired into the demo
+
+`neos/src/main.rs` gained two sections: `symphony-kernel: the same deadlock, for real` (the classic two-lock inversion, but built from two real threads via `ConcurrentTracker` directly, detected and resolved by a watchdog racing against genuinely blocked threads — stable across repeated runs, confirmed by hand) and `symphony-lang: real concurrency` (the 8-thread mutual-exclusion demonstration through real `symphony-lang` source, driven by `run_batch_concurrent`).
+
+## Human check
+
+Read the "real deadlock" section above alongside `symphony_kernel`'s own addendum for `ConcurrentTracker` — the bug that surfaced (a preempted task's own thread trying to release what was already taken from it) is the kind of thing that is structurally impossible to discover from a hand-sequenced single-thread scenario, since there IS no "the victim's thread keeps running" when there's only ever been one thread. It took real concurrency to exist before it could be found.

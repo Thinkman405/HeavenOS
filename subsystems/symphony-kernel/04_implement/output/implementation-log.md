@@ -4,7 +4,7 @@ subsystem: symphony-kernel
 stage: 04_implement
 status: complete
 toolchain: rustc 1.97.1 / cargo 1.97.1
-result: 77 passed, 0 failed (399 workspace-wide) across symphony_kernel + symphony_scheduler — see ConcurrentPool addendum
+result: 79 passed, 0 failed (453 workspace-wide) across symphony_kernel + symphony_scheduler — see ConcurrentPool and ConcurrentTracker addenda
 consumes: [lattice, substrate]
 ---
 
@@ -323,3 +323,48 @@ Reverted after confirming; workspace re-confirmed at 399/399, `python _system/st
 ## Human check
 
 Read `concurrent_allocations_never_corrupt_or_alias` in `neos/tests/symphony_scheduler.rs`, then `freeing_one_allocation_does_not_free_a_sibling_sharing_its_cell` in `neos/tests/substrate.rs`. The first found the bug; the second is the same bug with every thread removed — proof it was never about concurrency, only found by it.
+
+---
+
+# Addendum — `ConcurrentTracker`: real blocking, not just real safety
+
+```
+cargo build --workspace  → Finished, no warnings
+cargo test  --workspace  → 453 passed; 0 failed
+cargo test  -p symphony-kernel → 79 passed (38 symphony_kernel + 41 symphony_scheduler)
+```
+
+Workspace total: **448 → 453**. `symphony_kernel` unchanged at 38; `symphony_scheduler` 39 → 41.
+
+Built to close a limit [[symphony-lang]]'s `vm::Vm` states about itself directly: a blocked `acquire` traps because "there is no scheduler able to suspend a blocked program and resume it once the holder releases." `ConcurrentPool` proved a `Mutex` can make an already-total operation safe to share; that proof doesn't extend to `acquire`, which can legitimately answer "not yet" — a `Mutex` around it changes nothing about what a caller does with that answer. `ConcurrentTracker` (`Mutex<(ResourceTracker, WaitForGraph)>` + `Condvar`) is the missing piece: `blocking_acquire` loops on `tracker.acquire` and, on `Blocked`, calls `Condvar::wait` — the calling OS thread genuinely sleeps. `release` updates the tracker then calls `notify_all`, so every blocked waiter wakes and re-checks; `ResourceTracker::acquire`'s own documented idempotence (a repeated ask while still blocked is a no-op) is exactly what makes a spurious wake harmless.
+
+## Verified as a real wait — timed, not inferred
+
+`blocking_acquire_really_suspends_the_calling_thread_until_released` holds a resource for a measured `Duration::from_millis(150)` on one thread, then times a second thread's `blocking_acquire` call for the same resource with `Instant::now()`. A sequential `Blocked`-then-return implementation (what `ResourceTracker` alone already gives) would return in microseconds regardless of when the release happens; this must take at least the hold duration, confirmed directly rather than assumed from the presence of a `Condvar` in the type.
+
+## `resources_held_by` — the piece a generic resolver needs that a hand-built scenario never did
+
+The existing sequential deadlock demo (`neos/src/main.rs`) resolves its two-lock inversion by hand-picking which one resource its victim holds, because it built the scenario itself and already knows. A resolver watching real threads it did not script cannot assume that — `ResourceTracker::resources_held_by(task)` (new: filters `holders` for matches) answers "what does this task actually hold right now," and `ConcurrentTracker::force_release_all` releases every one of them, notifying waiters after each.
+
+## A real bug, found only because a second thread could keep running
+
+The first version of the real two-lock-inversion test (`two_real_threads_deadlock_and_the_watchdog_resolves_it`, in `neos/tests/symphony_scheduler.rs`) hung indefinitely on its first run — caught by running it under a bounded external timeout rather than letting it block the whole suite. Root cause, traced directly rather than guessed: after the watchdog force-releases the victim's one held fork, the victim's own thread — which is still running, blocked only on its *next* instruction — eventually gets that next fork granted (once the other philosopher finishes and releases it), proceeds to its own cleanup, and calls `release` on the fork that was already taken from it. `ResourceTracker::release` correctly refuses with `NotHolder`; the test's own `.unwrap()` turned that refusal into a panic mid-thread, which stalled `.join()` forever.
+
+This is not a `ConcurrentTracker` defect — `NotHolder` is exactly the right answer to "release something you don't hold," the same guard the sequential `ResourceTracker` has always had. It is a fact about real concurrency a single-thread scenario cannot produce: there, once a resource is force-released, nothing owning that "victim" ever runs again to ask for it back, because there is no separate thread to keep running. Fixed by writing each philosopher to tolerate `NotHolder` on its own release calls (`let _ = tracker.release(...)`) — the shape of a task actually built to survive preemption, not a change to the tracker.
+
+## Doctrine checks — two performed
+
+| Sabotage | Result |
+|---|---|
+| Condvar wait removed from `blocking_acquire` (`Blocked` treated as `Granted`) | **Failed three ways across two crates**: the timing test returned in microseconds; the real-threads deadlock test recorded no cycle at all (nothing ever actually waited, so no edge was ever added); `symphony-lang`'s own mutual-exclusion test observed real cross-thread data corruption |
+| `resources_held_by` returns nothing | **1 failed** — the deadlock test's own `released must not be empty` assertion, caught immediately, before either thread could be joined (no hang) |
+
+Both reverted after confirming; full suite re-confirmed at 79/79, 453/453 workspace-wide.
+
+## Wired into the demo
+
+`neos/src/main.rs` gained `symphony-kernel: the same deadlock, for real` — the identical two-lock-inversion scenario the sequential section above already demonstrates, rebuilt from two real OS threads via `ConcurrentTracker` directly, with a watchdog polling `detect_cycle` while both threads are genuinely, concurrently blocked. Confirmed stable across repeated manual runs.
+
+## Human check
+
+Read the hang-and-fix account above, then compare `two_tasks_contending_in_opposite_orders_deadlocks` (the existing sequential test, just above this addendum) against `two_real_threads_deadlock_and_the_watchdog_resolves_it` in `neos/tests/symphony_scheduler.rs` side by side. Both build the identical scenario; only the real-threads version could have surfaced the preemption bug, because only it has a second thread still running after the victim's resource is taken.

@@ -7,11 +7,12 @@
 
 use std::sync::Arc;
 use std::thread;
+use std::time::{Duration, Instant};
 use symphony_kernel::bifurcation::{superpose, Phase};
 use symphony_kernel::{
-    evaluate_branch, fork, fork_unit, Acquired, ConcurrentPool, CoreTopology, Interference,
-    KernelError, ResourceError, ResourceId, ResourceTracker, Scheduler, Task, TaskId,
-    WaitForGraph,
+    evaluate_branch, fork, fork_unit, Acquired, ConcurrentPool, ConcurrentTracker, CoreTopology,
+    Interference, KernelError, ResourceError, ResourceId, ResourceTracker, Scheduler, Task,
+    TaskId, WaitForGraph,
 };
 
 fn sched(cores: usize, tasks: usize, hz: f64) -> Scheduler {
@@ -625,6 +626,134 @@ fn concurrent_allocations_never_corrupt_or_alias() {
         pool.total_capacity(),
         "every allocation was freed; nothing should remain marked used"
     );
+}
+
+// ---------------------------------------- Group: ConcurrentTracker — real
+// ---------------------------------------- blocking, real deadlocks
+//
+// `ResourceTracker::acquire` answering `Blocked` is a fact recorded in a
+// data structure — nothing about it makes a *thread* wait. `ConcurrentPool`
+// only had to prove a `Mutex` prevents corruption of total operations;
+// `ConcurrentTracker` has to prove something behavioural: that a blocked
+// caller's own OS thread actually sleeps and actually wakes on release, not
+// just that concurrent access is race-free.
+
+/// The direct claim a `Condvar`-based wait exists to make: a second thread's
+/// `blocking_acquire` for a resource thread one already holds returns only
+/// *after* thread one releases — timed, not just check that it eventually
+/// returns. A `Blocked`-then-immediately-return implementation (the
+/// sequential `ResourceTracker` behaviour this wraps) would return in
+/// microseconds regardless of when the release happens; a real wait tracks
+/// it.
+#[test]
+fn blocking_acquire_really_suspends_the_calling_thread_until_released() {
+    let tracker = ConcurrentTracker::new();
+    let resource = ResourceId(1);
+    let hold = Duration::from_millis(150);
+
+    tracker.blocking_acquire(TaskId(1), resource).unwrap();
+
+    let holder_tracker = Arc::clone(&tracker);
+    let holder = thread::spawn(move || {
+        thread::sleep(hold);
+        holder_tracker.release(TaskId(1), resource).unwrap();
+    });
+
+    let start = Instant::now();
+    tracker.blocking_acquire(TaskId(2), resource).unwrap();
+    let elapsed = start.elapsed();
+
+    holder.join().unwrap();
+    assert!(
+        elapsed >= hold - Duration::from_millis(20),
+        "task 2 returned after {elapsed:?}, before task 1's {hold:?} hold — it did not really wait"
+    );
+}
+
+/// **The real version of `two_tasks_contending_in_opposite_orders_deadlocks`
+/// above** — the same classic two-lock inversion, but the two tasks are now
+/// real OS threads that really block, not two sequential calls on one
+/// thread recording what *would* happen. A third thread acts as the
+/// watchdog this workspace's own detection/resolution boundary always
+/// assigns to "application level": it polls `detect_cycle` (bounded, so a
+/// bug here fails the test instead of hanging the suite) and resolves with
+/// this workspace's existing stated policy — lowest `TaskId` in the cycle
+/// is the victim, `force_release_all` releases everything it holds.
+///
+/// Each philosopher's program acquires *both* forks and then releases both
+/// — not just acquires. This matters for what "resolved" can honestly mean:
+/// `neos/src/main.rs`'s own resolution notes plainly that force-releasing
+/// the victim's held resource does not cancel the victim's own still-
+/// pending request — "whichever task didn't get force-released may simply
+/// still be waiting, and correctly so." Stripping the victim's one held
+/// fork lets the *other* philosopher finish its meal and put both forks
+/// down, which is what actually frees the victim's own pending request —
+/// not the force-release directly. A program that never gives its forks
+/// back would leave the victim blocked forever no matter what the watchdog
+/// does, which is a fact about the scenario, not a bug to route around.
+///
+/// Both philosophers' own release calls tolerate `NotHolder` rather than
+/// unwrapping it — a real consequence of real preemption that a hand-built
+/// sequential scenario never has to face: the victim's own thread keeps
+/// running past the point its fork was taken, and will genuinely try to put
+/// back a fork it no longer holds. A task built to survive preemption
+/// checks for exactly this; one written with `.unwrap()` on every release
+/// is a task that assumes it can never be preempted, which stops being true
+/// the moment a watchdog exists at all.
+#[test]
+fn two_real_threads_deadlock_and_the_watchdog_resolves_it() {
+    let tracker = ConcurrentTracker::new();
+    let (fork_left, fork_right) = (ResourceId(1), ResourceId(2));
+    let (chef_a, chef_b) = (TaskId(1), TaskId(2));
+
+    // Each thread takes its own fork first, then reaches for the other's —
+    // the exact opposite-order scenario the sequential test builds by hand —
+    // eats, then puts both forks back down.
+    let t1 = {
+        let tracker = Arc::clone(&tracker);
+        thread::spawn(move || {
+            tracker.blocking_acquire(chef_a, fork_left).unwrap();
+            thread::sleep(Duration::from_millis(20)); // widen the window
+            tracker.blocking_acquire(chef_a, fork_right).unwrap();
+            let _ = tracker.release(chef_a, fork_right); // may already be gone under preemption
+            let _ = tracker.release(chef_a, fork_left);
+        })
+    };
+    let t2 = {
+        let tracker = Arc::clone(&tracker);
+        thread::spawn(move || {
+            tracker.blocking_acquire(chef_b, fork_right).unwrap();
+            thread::sleep(Duration::from_millis(20));
+            tracker.blocking_acquire(chef_b, fork_left).unwrap();
+            let _ = tracker.release(chef_b, fork_left);
+            let _ = tracker.release(chef_b, fork_right);
+        })
+    };
+
+    // Watchdog: both threads are now genuinely, concurrently blocked on
+    // real OS thread primitives — this loop runs alongside that, not after.
+    let mut cycle = None;
+    for _ in 0..500 {
+        if let Some(c) = tracker.detect_cycle() {
+            cycle = Some(c);
+            break;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    let cycle = cycle.expect("a real two-thread opposite-order acquire must deadlock and be detected within 5s");
+    assert_eq!(cycle.len(), 2);
+    assert!(cycle.contains(&chef_a) && cycle.contains(&chef_b));
+
+    let victim = *cycle.iter().min_by_key(|t| t.0).unwrap();
+    let released = tracker.force_release_all(victim);
+    assert!(!released.is_empty(), "the victim must have been holding something to release");
+
+    // Both real threads must now be able to finish: the release unblocks
+    // whichever philosopher wasn't the victim, who eats and puts both forks
+    // back down, which is what frees the victim's own still-pending request.
+    t1.join().unwrap();
+    t2.join().unwrap();
+    assert!(!tracker.has_deadlock(), "resolution must actually clear the cycle");
 }
 
 /// Requests that collectively exceed capacity, launched from many threads at

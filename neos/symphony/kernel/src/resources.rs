@@ -98,6 +98,20 @@ impl ResourceTracker {
         self.waiting_on.get(&task).copied()
     }
 
+    /// Every resource `task` currently holds — the piece a generic deadlock
+    /// resolver needs and single-victim call sites haven't: this workspace's
+    /// existing demo resolution (`neos/src/main.rs`) hand-picks which one
+    /// resource its two-task scenario's victim holds, since it already knows
+    /// the scenario. A resolver that doesn't know the scenario in advance
+    /// needs to ask, not assume a task holds exactly one thing.
+    pub fn resources_held_by(&self, task: TaskId) -> Vec<ResourceId> {
+        self.holders
+            .iter()
+            .filter(|&(_, &holder)| holder == task)
+            .map(|(&resource, _)| resource)
+            .collect()
+    }
+
     /// Acquire `resource` for `task`, feeding `graph` if `task` has to wait.
     pub fn acquire(
         &mut self,

@@ -4,7 +4,7 @@ subsystem: crystallisation
 stage: 04_implement
 status: complete
 toolchain: rustc 1.97.1 / cargo 1.97.1
-result: 34 passed, 0 failed base slices (18+16) + 20 codecs/video (356 workspace-wide)
+result: 62 passed, 0 failed across crystallisation + crystallisation_codec + crystallisation_timecrystal (454 workspace-wide) — see the real-FFT addendum for the most recent change
 consumes: [lattice, substrate]
 ---
 
@@ -76,7 +76,7 @@ Dependencies are `lattice` and `substrate` only. The PRD frames §8 as the gatew
 - **Codecs.** `PixelGrid` takes floats; nothing parses PNG or WAV. Not §8's subject.
 - **Rendering.** `FaceProjection` is data; `gui` owns drawing. Nothing yet hands one to the renderer.
 - **Spectral frequency estimation.** `from_samples` uses zero-crossing rate, adequate for a single tone and honest about not being a spectral estimate — a polyphonic stream has no one dominant frequency.
-- **A real FFT.** The DFT is `O(n²)`, fine for the grid sizes here and not worth a dependency yet.
+- ~~A real FFT.~~ Built in a later pass without a dependency — see the addendum at the end of this log.
 
 ## Human check
 
@@ -141,7 +141,8 @@ The mode spectrum comes from the **same DFT** the holographic pipeline uses — 
 
 ## Still not built
 
-- **Rendering** and **a real FFT** — unchanged from slice 1. `PixelGrid`/`FrequencyMap`'s `O(n²)` DFT is fine at the grid sizes this crate is tested at and not worth a dependency yet.
+- **Rendering** — unchanged from slice 1.
+- ~~A real FFT~~ — built in a later pass. See the addendum at the end of this log.
 
 **Wiring into `gui` is now built**, as a `gui`-side join rather than a change here: `gui::TetryenVisualisation::from_phase_vector` takes one `PhaseSpaceVector` and drives one standing wave per Tetryen node from its four components, reusing this file's own stated correspondence in §1 (*"the four components map to the four vertices of a fundamental Tetryen cell"*). `FaceProjection` is wired the same way via `from_face_projections`. See `gui`'s `CONTEXT.md` and root `CONTEXT.md`'s cross-cutting slices.
 
@@ -244,3 +245,46 @@ Both reverted after confirming; full workspace re-run clean at 423/423.
 ## Human check
 
 Read `identical_components_evolve_by_the_uncoupled_identity_regardless_of_coupling` first, the same isolation strategy `gui`'s equivalent test uses. Then compare this file's `step` against `gui::evolution::TetryenState::step` side by side — the uncoupled term and the coupling weight should be identical in substance, differing only in where `omega` and the coupling weight come from.
+
+---
+
+# Addendum — a real FFT, closing the one item every earlier slice carried forward
+
+```
+cargo build --workspace  → Finished, no warnings
+cargo test  --workspace  → 454 passed; 0 failed
+cargo test  -p crystallisation → 62 passed (21 + 20 + 21)
+```
+
+Workspace total: **453 → 454**. `crystallisation` 20 → 21 (one new cross-check test; the rest of the increase is the workspace's own concurrent tests landing in the same window).
+
+Every prior slice's "still not built" list named the same thing: `FrequencyMap::transform`'s direct 2D sum is `O((HW)^2)`, "fine for the grid sizes here and not worth a dependency yet." Closed without a dependency — the discipline this crate already follows for PPM/WAV (hand-written codecs over pulling in a format crate) applied to the transform itself.
+
+## The free win, before any fast algorithm
+
+The 2D DFT separates into two passes of 1D DFTs — `e^{-2*pi*i*(uy/H + vx/W)} = e^{-2*pi*i*uy/H} * e^{-2*pi*i*vx/W}`, an exact algebraic identity, not an approximation or a special case. Transforming every row (length `W`) and then every column (length `H`) computes the *identical* coefficients as the direct 2D sum, at `O(HW*(H+W))` instead of `O((HW)^2)` — a real complexity improvement that costs nothing in accuracy and needs no fast algorithm to claim. This alone was verified against the existing direct sum in a disposable scratch harness (`neos/crystallisation/examples/scratch_fft_check.rs`, deleted after use) before a single line of the real module changed, across power-of-two shapes, non-power-of-two shapes (`3x3`, `5x7`), and the exact `1xN` shape production code uses for every audio/video signal — agreement to ~1e-12 in every case.
+
+## The real FFT, on top
+
+Each 1D pass then dispatches to a radix-2 Cooley-Tukey FFT (`O(N log N)`) when that axis's length is a power of two, and to the exact `O(N^2)` 1D sum otherwise. This split is not a compromise forced by running out of time for the general case — it is the honest shape of what this crate's actual inputs are: a `3x3` grid is one of this crate's own uneven-projection test fixtures, and a decoded audio/video signal's sample count has no reason to be a power of two. A general mixed-radix or Bluestein FFT would handle those too, at real additional numerical-code complexity and real additional risk of a subtle correctness bug in a from-scratch implementation; falling back to the already-exact direct sum for anything not a clean power of two costs nothing in correctness and a great deal less in implementation risk, for cases that are already small enough that `O(N^2)` is not the bottleneck.
+
+## Verified before it replaced anything, and again after
+
+Same scratch harness as above confirmed `fft_radix2`'s output matches the direct sum at power-of-two sizes specifically (`4x4`, `8x8`, `2x8`, `16x4`) to ~1e-12, before `FrequencyMap::transform`/`inverse` were touched. After the real module changed: every existing test in `neos/tests/crystallisation.rs` passed unmodified, including `parseval_holds`, `transform_round_trips`, and `dc_term_is_the_pixel_sum` — all of which already exercise the FFT path incidentally, since the shared `grid()` fixture is `4x4`. A new test, `fft_matches_an_independent_direct_dft_at_power_of_two_sizes`, checks the actual coefficients (not just Parseval/round-trip, which an exact-but-differently-ordered computation would also satisfy) against a second, independently written direct-sum implementation — the same cross-validation discipline `lattice::pathfinding` vs `ftg`'s own `bfs_hops` already established for this workspace.
+
+## Doctrine checks — two performed
+
+| Sabotage | Result |
+|---|---|
+| Inverse sign not flipped (`inverse { 1.0 } else { -1.0 }` → `inverse { -1.0 } else { -1.0 }`) | **1 failed** — `transform_round_trips`: the inverse stopped inverting |
+| Bit-reversal permutation skipped entirely | **2 failed** — `fft_matches_an_independent_direct_dft_at_power_of_two_sizes` (wrong coefficients directly) and `transform_round_trips` (round trip no longer recovers the original) |
+
+Both reverted after confirming; full suite re-confirmed at 21/21 in this file, 454/454 workspace-wide.
+
+## What stays exactly as documented
+
+No behaviour changed for any caller: `crystallise_video`'s per-frame energy reduction, the quantisation ceiling, the Parseval invariant, the DC-term identity — all unchanged, because the transform's actual *output* is unchanged, only how it's computed. Running the demo binary confirms this directly: the video crystallisation section reports the identical energy (`9.8302e-25 J`) and `conserving: true` before and after this change.
+
+## Human check
+
+Read `fft_matches_an_independent_direct_dft_at_power_of_two_sizes` alongside `parseval_holds`/`transform_round_trips` — the new test checks the actual numbers a second implementation independently computes; the older tests check properties an exact-but-differently-computed result would also satisfy. Both kinds of test are doing real work here, and neither substitutes for the other.

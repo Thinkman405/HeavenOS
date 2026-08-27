@@ -77,6 +77,7 @@
 //! privilege domains — see `_mkb/instruction_set.md` for exactly what was
 //! composed and what was deliberately left out.
 
+pub mod concurrent;
 pub mod interpreter;
 pub mod lexer;
 pub mod parser;

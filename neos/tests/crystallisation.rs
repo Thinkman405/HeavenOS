@@ -285,6 +285,54 @@ fn uniform_image_has_only_a_dc_term() {
     }
 }
 
+/// 2.9 [D] — **`FrequencyMap::transform` agrees with an independent, direct
+/// `O(N^2)` DFT**, at power-of-two sizes specifically — the shapes that
+/// route through the real radix-2 FFT rather than falling back to the exact
+/// sum. `parseval_holds`/`transform_round_trips` already exercise the FFT
+/// path incidentally (`grid()` is `4x4`), but only check properties the
+/// *exact* DFT would also satisfy; this checks the actual coefficients
+/// against a second, independently written implementation, the same
+/// cross-validation discipline `lattice::pathfinding` vs `ftg`'s own `bfs`
+/// already established — not "the formula looks textbook so it must
+/// agree," an *actual* second computation.
+#[test]
+fn fft_matches_an_independent_direct_dft_at_power_of_two_sizes() {
+    fn direct_2d_dft(pixels: &[f64], h: usize, w: usize) -> Vec<(f64, f64)> {
+        let tau = std::f64::consts::TAU;
+        let mut out = vec![(0.0, 0.0); h * w];
+        for u in 0..h {
+            for v in 0..w {
+                let (mut re, mut im) = (0.0, 0.0);
+                for y in 0..h {
+                    for x in 0..w {
+                        let ang = -tau * (u as f64 * y as f64 / h as f64 + v as f64 * x as f64 / w as f64);
+                        let p = pixels[y * w + x];
+                        re += p * ang.cos();
+                        im += p * ang.sin();
+                    }
+                }
+                out[u * w + v] = (re, im);
+            }
+        }
+        out
+    }
+
+    for &(h, w) in &[(4usize, 4usize), (8, 2), (1, 16), (2, 8)] {
+        let pixels: Vec<f64> = (0..h * w).map(|i| (i as f64 * 1.9).sin() * 4.0 + i as f64 * 0.2).collect();
+        let grid = PixelGrid::new(h, w, pixels.clone()).unwrap();
+        let expected = direct_2d_dft(&pixels, h, w);
+        let actual = FrequencyMap::transform(&grid);
+        for (i, (c, (re, im))) in actual.coefficients().iter().zip(expected.iter()).enumerate() {
+            assert!(
+                (c.re - re).abs() < 1e-8 && (c.im - im).abs() < 1e-8,
+                "{h}x{w} coefficient {i}: got ({}, {}), independent DFT gives ({re}, {im})",
+                c.re,
+                c.im
+            );
+        }
+    }
+}
+
 // -------------------------------------------------- Group 3: resonant
 
 /// 3.1 — a tone maps to an oscillator near its true frequency.

@@ -17,6 +17,7 @@
 //! binary instead, consuming `gui`'s geometry and amplitude types to produce
 //! an actual image — see that module for why it belongs here and not there.
 
+mod export;
 mod gif;
 mod render;
 
@@ -33,13 +34,17 @@ use ftg::Frame;
 use gui::telemetry::SystemSnapshot;
 use gui::visualization::{LoadVisualisation, TetryenVisualisation};
 use gui::Tetryen;
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::thread;
+use std::time::Duration;
 use substrate::{Hypervisor, TrapAction};
 use symphony_kernel::bifurcation::{Phase, TaskModel};
 use symphony_kernel::{
-    ConcurrentPool, ResourceId, ResourceTracker, Scheduler, Task, TaskId, WaitForGraph,
+    ConcurrentPool, ConcurrentTracker, ResourceId, ResourceTracker, Scheduler, Task, TaskId,
+    WaitForGraph,
 };
+use symphony_lang::concurrent::run_batch_concurrent;
 use symphony_lang::vm::{compile as lang_compile, Vm as LangVm};
 use symphony_lang::{
     lex as lang_lex, parse as lang_parse, Domain as LangDomain, TrapAction as LangTrapAction,
@@ -280,6 +285,65 @@ fn main() {
     // task didn't get force-released may simply still be waiting, and
     // correctly so: a lone wait with nobody waiting back is not a deadlock.
 
+    // ---- symphony-kernel: the same deadlock, for real -------------------
+    //
+    // The section above builds the classic two-lock inversion by calling
+    // `acquire` in a hand-chosen sequence on one thread — real detection and
+    // resolution, but a simulated *contention*: nothing was actually
+    // fighting over anything at the same time. `ConcurrentTracker` (real
+    // `Mutex` + `Condvar`, not `WaitForGraph`'s own re-derivation) makes the
+    // contention real too: two real OS threads, each genuinely blocked on
+    // its own `blocking_acquire` call, at the same time, on two different
+    // cores — not narrated, not sequenced by this function.
+    let real_tracker = ConcurrentTracker::new();
+    let (real_left, real_right) = (ResourceId(101), ResourceId(102));
+    let (real_a, real_b) = (TaskId(101), TaskId(102));
+    let t_a = {
+        let tracker = Arc::clone(&real_tracker);
+        thread::spawn(move || {
+            tracker.blocking_acquire(real_a, real_left).unwrap();
+            thread::sleep(Duration::from_millis(20)); // widen the window for the real race
+            tracker.blocking_acquire(real_a, real_right).unwrap();
+            let _ = tracker.release(real_a, real_right);
+            let _ = tracker.release(real_a, real_left);
+        })
+    };
+    let t_b = {
+        let tracker = Arc::clone(&real_tracker);
+        thread::spawn(move || {
+            tracker.blocking_acquire(real_b, real_right).unwrap();
+            thread::sleep(Duration::from_millis(20));
+            tracker.blocking_acquire(real_b, real_left).unwrap();
+            let _ = tracker.release(real_b, real_left);
+            let _ = tracker.release(real_b, real_right);
+        })
+    };
+
+    println!("\nsymphony-kernel: the same deadlock, for real");
+    let mut real_cycle = None;
+    for _ in 0..500 {
+        if let Some(c) = real_tracker.detect_cycle() {
+            real_cycle = Some(c);
+            break;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    let real_cycle = real_cycle.expect("two real threads in opposite acquisition order must cycle");
+    println!("  detected       cycle {real_cycle:?} — two real OS threads, genuinely blocked");
+
+    let real_victim = *real_cycle.iter().min_by_key(|t| t.0).unwrap();
+    let real_released = real_tracker.force_release_all(real_victim);
+    println!(
+        "  resolved       task {real_victim:?} force-released {real_released:?} (same victim policy: lowest TaskId)"
+    );
+
+    t_a.join().expect("thread a must finish once the deadlock actually clears");
+    t_b.join().expect("thread b must finish once the deadlock actually clears");
+    println!(
+        "  confirmed      both real threads finished; deadlock cleared: {}",
+        !real_tracker.has_deadlock()
+    );
+
     // ---- symphony-kernel: real concurrent allocation --------------------
     //
     // `substrate::MemoryPool` is deliberately single-threaded; its own
@@ -446,6 +510,46 @@ fn main() {
         Some(fault) => println!("  refused        Domain::Guest denied: {fault:?}"),
         None => panic!("a guest program must not be able to touch reserved cells"),
     }
+
+    // ---- symphony-lang: real concurrency (symphony_lang::concurrent) ----
+    //
+    // `Vm::run_batch` is sequential — one program to completion at a time,
+    // a stated real limit `_mkb/instruction_set.md` names outright.
+    // `concurrent::run_batch_concurrent` is the real scheduler that limit
+    // was missing: real OS threads sharing one real `ConcurrentPool`. Eight
+    // threads each `acquire` the same resource, `store` their own distinct
+    // frequency into the *same* shared cell, and `load` it straight back —
+    // if the lock did not really exclude the others, at least one thread
+    // would read back someone else's value instead of its own.
+    let conc_pool = ConcurrentPool::new(4, 64);
+    let conc_tracker = ConcurrentTracker::new();
+    let conc_reserved: Arc<HashSet<lattice::tessellation::CellId>> = Arc::new(HashSet::new());
+    let conc_programs: Vec<_> = (0..8u64)
+        .map(|i| {
+            let freq = 300.0 + i as f64;
+            let source = format!(
+                "task me at {freq} hz phase +\nacquire 7\nstore me at cell 1\nload echo at cell 1\nrelease 7"
+            );
+            let instructions = lang_compile(&lang_parse(&lang_lex(&source).unwrap()).unwrap());
+            (TaskId(2000 + i), LangDomain::Kernel, instructions)
+        })
+        .collect();
+    let conc_outcomes =
+        run_batch_concurrent(&conc_pool, &conc_tracker, &conc_reserved, conc_programs);
+    let all_consistent = conc_outcomes.iter().all(|o| {
+        o.trap.is_none() && o.declared["echo"].frequency() == o.declared["me"].frequency()
+    });
+    println!("\nsymphony-lang: real concurrency");
+    println!(
+        "  contended      8 real OS threads, one shared cell, real acquire/release around each store+load"
+    );
+    println!(
+        "  confirmed      every thread read back its own value: {all_consistent}"
+    );
+    assert!(
+        all_consistent,
+        "real mutual exclusion must prevent any thread's store/load from interleaving with another's"
+    );
 
     // ---- ftg: deliver a real frame over a resonant session --------------
     //
@@ -642,4 +746,21 @@ fn main() {
     render_and_report("image", "render", &geometry, &tetryen, &load);
     render_and_report("audio", "render_audio", &geometry, &audio_vis, &load);
     render_and_report("video", "render_video", &geometry, &video_vis, &load);
+
+    // ---- export: the same real data, as JSON -----------------------------
+    //
+    // Everything the interactive viewer draws is a second read of exactly
+    // these already-computed values — not a reconstruction of them in a
+    // second language. See `export.rs`.
+    export::write_json_report(
+        "report.json",
+        &geometry,
+        &[("image", &tetryen), ("audio", &audio_vis), ("video", &video_vis)],
+        &load,
+        snapshot.imbalance(),
+        WAVE_K,
+        WAVE_OMEGA,
+    )
+    .expect("writing the JSON report");
+    println!("\nexport           report.json (real geometry + amplitudes, for the interactive viewer)");
 }

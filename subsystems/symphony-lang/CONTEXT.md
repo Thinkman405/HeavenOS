@@ -5,12 +5,12 @@ tier: 2
 language: custom DSL
 stage: 04_implement
 status: complete
-result: "69 tests passing. Lexer, parser, interpreter. All three of PRD 3's geometric gates. A2 enforced by refusing to tokenise Boolean constructs; the TaskModel seam is closed. A second execution engine (vm) compiles the same grammar into a flat, program-counter-addressed instruction sequence with real store/load through substrate::MemoryPool (both cell-ordinal and real ⊗-fold path addressing) and real acquire/release through symphony_kernel::resources, isolating a runtime fault per program rather than per Rust process. vm::Vm::run_program_trapped adds real dynamic fault routing on top — a handler called on every memory fault with &mut MemoryPool, able to retry the exact faulting instruction, the direct language-level counterpart to substrate::Hypervisor::allocate_trapped. vm::Domain/Vm::reserve_cells add privilege domains as a stated engineering convention (explicitly not law, since none exists) enforced at the resolved address."
+result: "72 tests passing. Lexer, parser, interpreter. All three of PRD 3's geometric gates. A2 enforced by refusing to tokenise Boolean constructs; the TaskModel seam is closed. A second execution engine (vm) compiles the same grammar into a flat, program-counter-addressed instruction sequence with real store/load through substrate::MemoryPool (both cell-ordinal and real ⊗-fold path addressing) and real acquire/release through symphony_kernel::resources, isolating a runtime fault per program rather than per Rust process. vm::Vm::run_program_trapped adds real dynamic fault routing on top — a handler called on every memory fault with &mut MemoryPool, able to retry the exact faulting instruction, the direct language-level counterpart to substrate::Hypervisor::allocate_trapped. vm::Domain/Vm::reserve_cells add privilege domains as a stated engineering convention (explicitly not law, since none exists) enforced at the resolved address. A third engine, concurrent::run_program/run_batch_concurrent, closes vm's stated 'no scheduler' limit for real: real OS threads sharing a real symphony_kernel::ConcurrentPool/ConcurrentTracker, blocking acquire verified by timing an actual wait."
 prd_sections: ["3"]
 binds_axioms: ["A1", "A2", "A3"]
 split_from: symphony
-consumes: [symphony-kernel, substrate]
-slices: ["lexer + parser + interpreter, interference gate", "phase shift and scale modulation gates", "the instruction-executing state machine (vm)"]
+consumes: [symphony-kernel, substrate, lattice]
+slices: ["lexer + parser + interpreter, interference gate", "phase shift and scale modulation gates", "the instruction-executing state machine (vm)", "real concurrency (concurrent)"]
 ---
 
 # Symphony-lang — the kernel DSL
@@ -80,7 +80,15 @@ Verified before being trusted: the flat dispatcher must produce **exactly** the 
 
 **Dynamic fault routing, the direct counterpart to `Hypervisor::allocate_trapped`.** `Vm::run_program_trapped` calls a caller-supplied handler on every `store`/`load` memory fault, with `&mut MemoryPool` so a real correction is possible — concretely, seeding a cell a `load` found corrupt, then asking for a retry. A retry re-executes **only the faulting instruction**, at the same program counter; everything the program already accumulated (`declared`, `emitted`, ...) is untouched, so there is no whole-program-restart semantics to reason about, and no risk of a prior `task` being redeclared or a prior `emit` firing twice. `max_retries` bounds the total, identically to `allocate_trapped`'s own second guard. Scoped the same way too: `UndeclaredTask`/`DuplicateTask` — the program's own logic errors — are never offered to the handler, since no amount of retrying fixes an undeclared name. `run_program` is unchanged and is now defined in terms of this: `max_retries: 0` with a handler that always propagates, so the entire existing test suite (65 tests) doubles as a regression guard that the untrapped path's behaviour did not shift.
 
-## Doctrine checks — eight performed
+## Slice 4 — real concurrency (`concurrent`), the one limit `vm` never closes itself
+
+`vm::run_program_trapped`'s own doc names the limit plainly: `Vm::run_batch` runs one program to completion at a time, so a blocked `acquire` has to trap — there is no scheduler to suspend and later resume it. `concurrent::run_program`/`run_batch_concurrent` are that scheduler, built from real OS threads rather than teaching `Vm` to simulate one. Unlike Phase 4's privilege domains, this closes by **composing**, the same category as Phases 1-3: `symphony_kernel::ResourceTracker`'s own semantics (idempotent re-ask while blocked, one outstanding wait per task) are completely unchanged — a new `symphony_kernel::ConcurrentTracker` (`Mutex` + `Condvar`, the resource-side sibling of the existing `ConcurrentPool`) only adds the wait/wake mechanism around calls to that same, already-tested logic. `ACQUIRE` inside `concurrent::run_program` calls `ConcurrentTracker::blocking_acquire`, which suspends the **calling OS thread** until granted — verified by timing a real wait (`Duration::from_millis(150)` held, the second thread's own `blocking_acquire` measured to take at least that long), not inferred from the API's shape.
+
+`concurrent.rs` is a **second dispatch loop**, not a generalisation of `vm::Vm` — `Vm<'a>`'s exclusive-borrow design is the right shape for one thread owning its pool/tracker outright, and the wrong shape for sharing across real threads at the same time, which needs owned `Arc` handles instead. Rather than force one type to serve both shapes behind an abstraction, `concurrent::run_program` duplicates the ~150-line dispatch logic against the `Arc`'d forms — the same trade `ConcurrentPool` already made against plain `MemoryPool` rather than unifying the two behind a trait. `vm::Vm` itself, and all 69 tests written against it, are completely untouched by this slice.
+
+**A real deadlock can now really happen, and resolving it surfaced a genuine subtlety the sequential demo never had to face.** `ConcurrentTracker::force_release_all` (backed by a new `ResourceTracker::resources_held_by`) generalises the sequential demo's hand-picked "the victim holds exactly this one resource" into "release everything the victim currently holds" — necessary once the scenario isn't known in advance. The first version of the real-threads deadlock test had each philosopher `.unwrap()` its own `release` calls and hung on first run: after the watchdog force-releases the victim's one held fork, the victim's *own thread keeps running* and eventually reaches its own `release` call for that exact fork — which it no longer holds, so `NotHolder` fires, and `.unwrap()` turns that into a panic mid-thread, which stalls the whole test on `join()`. A hand-sequenced single-thread scenario never has to reckon with the victim's own control flow continuing past the point it was preempted; a real thread does. Fixed by having each philosopher tolerate `NotHolder` on release (`let _ = tracker.release(...)`) — the honest shape of a task written to survive real preemption, not a workaround.
+
+## Doctrine checks — ten performed
 
 | Sabotage | Result |
 |---|---|
@@ -92,8 +100,10 @@ Verified before being trusted: the flat dispatcher must produce **exactly** the 
 | `TrapAction::Propagate` ignored (retried regardless of the handler's answer) | **1 of 65 failed** — `propagate_still_traps_immediately_even_with_retries_available`: 11 handler calls instead of 1 |
 | Privilege check disabled entirely (`if false && ...`) | **4 of 69 failed** — every reserved-cell test, both `Address::Cell` and `Address::Path` forms |
 | Privilege check's domain condition inverted (`Domain::Kernel` instead of `Domain::Guest`) | **4 of 69 failed** — the same four, this time for the opposite reason: `Domain::Kernel` was wrongly blocked and `Domain::Guest` wrongly let through |
+| `ConcurrentTracker::blocking_acquire`'s wait removed (`Blocked` treated as `Granted`) | **3 tests failed across two crates** — the timing test returned in microseconds instead of waiting out the real hold; the real-threads deadlock test found no cycle at all (no wait ever recorded); the language-level mutual-exclusion test observed real cross-thread interleaving corruption |
+| `ResourceTracker::resources_held_by` returns nothing | **1 failed** — `two_real_threads_deadlock_and_the_watchdog_resolves_it`'s own `released must not be empty` assertion, caught before either thread could be joined |
 
-All eight reverted after confirming; full suite re-confirmed at 69/69, 448/448 workspace-wide.
+All ten reverted after confirming; full suite re-confirmed at 72/72, 453/453 workspace-wide.
 
 ## Three findings worth carrying
 
@@ -120,7 +130,8 @@ Also absent, and each for a stated reason:
 - **A gate combinator** (`resonates AND aligns`). It would need a truth table — the thing A2 removes. Nesting a branch inside another already composes gates.
 - **A scale comparison.** See above.
 - **Deadlock *resolution* through the language.** `vm`'s `acquire`/`release` now let a program *declare* resource acquisition (closing the gap this section used to name), and a blocked acquire traps rather than resolving anything — the kernel's detection/resolution boundary is unchanged; resolving a cycle is still application-level, demonstrated in `neos/src/main.rs`, never inside this crate.
-- **True concurrency in `vm`.** `Vm::run_batch` runs one program to completion at a time; a blocked `acquire` traps rather than suspending and resuming later, a stated real limit.
+- **`vm::Vm` itself still has no scheduler.** `Vm::run_batch` remains sequential by design; real concurrency lives in the separate `concurrent` module (see Slice 4 above), not inside `Vm`.
+- **Deadlock resolution inside `concurrent`.** It detects (via the unchanged `WaitForGraph`) but never resolves a cycle — resolution stays application-level, demonstrated in `neos/src/main.rs`'s own watchdog, the identical boundary the sequential kernel demo already keeps.
 - **A derived privilege policy.** `vm::Domain`/`Vm::reserve_cells` (built — see above) are the enforcement *mechanism*; still absent, because no law defines it either, is any claim about what should be protected, how many domains beyond two are meaningful, or anything resembling a derived security model. The policy is left entirely to whatever host calls `reserve_cells`.
 
 ## Do not

@@ -5,9 +5,15 @@
 //! sharp form — **would this test pass against a language with `if` and
 //! `bool`?** If yes, it is testing a parser, not NEOS.
 
+use std::collections::HashSet;
+use std::sync::Arc;
 use substrate::{MemoryPool, SubstrateError};
 use symphony_kernel::bifurcation::TaskModel;
-use symphony_kernel::{detuning, Interference, Phase, ResourceTracker, Scheduler, TaskId, WaitForGraph};
+use symphony_kernel::{
+    detuning, ConcurrentPool, ConcurrentTracker, Interference, Phase, ResourceTracker, Scheduler,
+    TaskId, WaitForGraph,
+};
+use symphony_lang::concurrent::run_batch_concurrent;
 use symphony_lang::vm::{compile, Instruction, ResourceOutcome, Vm, VmFault};
 use symphony_lang::{
     execute, execute_with, lex, parse, run, Address, Alignment, Domain, LangError, RuntimeTask,
@@ -1578,4 +1584,130 @@ fn path_addresses_accept_negative_and_fractional_values() {
         }
         other => panic!("expected a Path address, got {other:?}"),
     }
+}
+
+// ------------------------------------------ real concurrency (`concurrent`)
+//
+// `vm::Vm` is sequential by design — `run_batch` runs one program to
+// completion at a time, and `_mkb/instruction_set.md` states plainly that
+// `acquire` blocking traps rather than suspending because "there is no
+// scheduler able to suspend a blocked program and resume it once the
+// holder releases." `symphony_lang::concurrent` is that scheduler: real OS
+// threads, a real shared `ConcurrentPool`/`ConcurrentTracker`. Deeper
+// blocking/deadlock-resolution behaviour is verified directly against
+// `ConcurrentTracker` in `neos/tests/symphony_scheduler.rs`; these tests
+// verify the *language* layer built on top of it.
+
+/// The direct analogue of `ConcurrentPool`'s own original verification
+/// (distinct fingerprint per thread, read back, must match): `N` real
+/// threads each run a program that, while holding a shared resource,
+/// stores its own distinct frequency into a shared cell and immediately
+/// loads it back. If `acquire` did not really exclude other threads from
+/// the critical section, at least one thread would sometimes read back a
+/// different thread's just-written value instead of its own.
+#[test]
+fn real_threads_serialize_correctly_under_a_shared_resource() {
+    let pool = ConcurrentPool::new(4, 64);
+    let tracker = ConcurrentTracker::new();
+    let reserved: Arc<HashSet<lattice::tessellation::CellId>> = Arc::new(HashSet::new());
+
+    let threads = 8;
+    let programs: Vec<_> = (0..threads)
+        .map(|i| {
+            let freq = 100.0 + i as f64;
+            let source = format!(
+                "task me at {freq} hz phase +\n\
+                 acquire 1\n\
+                 store me at cell 0\n\
+                 load echo at cell 0\n\
+                 release 1"
+            );
+            let instructions = compile(&parse(&lex(&source).unwrap()).unwrap());
+            (TaskId(i as u64), Domain::Kernel, instructions)
+        })
+        .collect();
+
+    let outcomes = run_batch_concurrent(&pool, &tracker, &reserved, programs);
+
+    assert_eq!(outcomes.len(), threads);
+    for (i, outcome) in outcomes.iter().enumerate() {
+        assert!(outcome.trap.is_none(), "thread {i} faulted: {:?}", outcome.trap);
+        let me = outcome.declared["me"].frequency();
+        let echo = outcome.declared["echo"].frequency();
+        assert_eq!(
+            echo, me,
+            "thread {i} read back {echo} hz instead of its own {me} hz — \
+             another thread's store/load interleaved inside the critical section"
+        );
+    }
+}
+
+/// Real concurrent `store`/`load` to *distinct* cells, through the same
+/// shared `ConcurrentPool` the language now drives — no resource contention
+/// involved, just proving the language-level dispatch loop composes
+/// correctly with real concurrent memory access end to end, not only in
+/// isolated unit calls.
+#[test]
+fn store_load_stays_correct_across_distinct_cells_under_real_concurrency() {
+    let pool = ConcurrentPool::new(8, 64);
+    let tracker = ConcurrentTracker::new();
+    let reserved: Arc<HashSet<lattice::tessellation::CellId>> = Arc::new(HashSet::new());
+
+    let threads = 6;
+    let programs: Vec<_> = (0..threads)
+        .map(|i| {
+            let freq = 200.0 + i as f64 * 10.0;
+            let source = format!(
+                "task mine at {freq} hz phase -\nstore mine at cell {i}\nload back at cell {i}"
+            );
+            let instructions = compile(&parse(&lex(&source).unwrap()).unwrap());
+            (TaskId(i as u64), Domain::Kernel, instructions)
+        })
+        .collect();
+
+    let outcomes = run_batch_concurrent(&pool, &tracker, &reserved, programs);
+    for (i, outcome) in outcomes.iter().enumerate() {
+        assert!(outcome.trap.is_none(), "thread {i} faulted: {:?}", outcome.trap);
+        assert_eq!(outcome.declared["back"].frequency(), 200.0 + i as f64 * 10.0);
+        assert_eq!(outcome.declared["back"].guard_phase(), Phase::Negative);
+    }
+}
+
+/// Privilege domains (Phase 4) hold under real concurrency too: a
+/// `Domain::Guest` program in the same batch as trusted `Domain::Kernel`
+/// programs is still refused from a reserved cell, even though the check
+/// now runs on its own real OS thread rather than the single sequential
+/// dispatch loop it was originally verified against.
+#[test]
+fn privilege_domains_are_enforced_across_real_concurrent_threads() {
+    let pool = ConcurrentPool::new(4, 64);
+    let tracker = ConcurrentTracker::new();
+    let reserved_cell = pool.address_at(2).unwrap().cell();
+    let mut set = HashSet::new();
+    set.insert(reserved_cell);
+    let reserved = Arc::new(set);
+
+    let guest = compile(
+        &parse(&lex("task x at 1 hz phase +\nstore x at cell 2").unwrap()).unwrap(),
+    );
+    let kernel = compile(
+        &parse(&lex("task y at 1 hz phase +\nstore y at cell 3").unwrap()).unwrap(),
+    );
+
+    let outcomes = run_batch_concurrent(
+        &pool,
+        &tracker,
+        &reserved,
+        vec![
+            (TaskId(0), Domain::Guest, guest),
+            (TaskId(1), Domain::Kernel, kernel),
+        ],
+    );
+
+    assert!(
+        matches!(outcomes[0].trap, Some(VmFault::PrivilegeViolation { .. })),
+        "the guest program must be refused, got {:?}",
+        outcomes[0].trap
+    );
+    assert!(outcomes[1].trap.is_none(), "the trusted program must be unaffected");
 }

@@ -8,6 +8,7 @@ neos/render_audio.ppm
 neos/render_audio.gif
 neos/render_video.ppm
 neos/render_video.gif
+neos/report.json
 
 # Local, machine-specific Claude Code settings
 .claude/settings.local.json

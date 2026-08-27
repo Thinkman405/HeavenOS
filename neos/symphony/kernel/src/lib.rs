@@ -34,6 +34,7 @@
 //! and is fully implemented, not stubbed.
 
 pub mod bifurcation;
+pub mod concurrent_resources;
 pub mod deadlock;
 pub mod equilibrium;
 pub mod memory;
@@ -86,6 +87,7 @@ impl std::error::Error for KernelError {}
 pub use bifurcation::{
     detuning, evaluate_branch, fork, fork_unit, resonates, Bifurcation, Interference, Phase,
 };
+pub use concurrent_resources::ConcurrentTracker;
 pub use deadlock::WaitForGraph;
 pub use equilibrium::{CoreTopology, LoadField};
 pub use memory::ConcurrentPool;

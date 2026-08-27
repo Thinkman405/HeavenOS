@@ -76,14 +76,23 @@ Built anyway, once asked a third time with that fact restated each time — as a
 
 What stays genuinely unbuilt, because there's still no law for it either: what privilege *should* protect beyond memory cells (resource acquisition, instruction categories), how many domains beyond two, or anything resembling a derived security model. This section is a mechanism, not a policy — the policy (which cells, for which programs) is left entirely to the host that calls `reserve_cells`.
 
+## Real concurrency — `symphony_lang::concurrent`
+
+The stated limit directly above — "`ACQUIRE` blocking traps rather than pretending to schedule" — is closed, not by teaching `vm::Vm` to schedule, but by giving `ACQUIRE` a real scheduler to block against: real OS threads, sharing a real `symphony_kernel::ConcurrentPool` and a new `symphony_kernel::ConcurrentTracker` (`Mutex` + `Condvar` around `ResourceTracker`/`WaitForGraph`). A blocked `ACQUIRE` now suspends the **calling OS thread** via `ConcurrentTracker::blocking_acquire` and wakes when any thread `release`s — genuine blocking, verified by timing a real wait, not inferred from the API's shape.
+
+This is composition, the same category as Phases 1-3, not a Phase-4-style stated convention: `ResourceTracker::acquire`/`release`'s own semantics (idempotent re-ask while blocked, at most one outstanding wait per task) are completely unchanged — `ConcurrentTracker` only adds the wait/wake mechanism around calls to that same, already-tested logic. `symphony_lang::concurrent::run_program` is a second dispatch loop, not a generalisation of `vm::Vm`: sharing mutable state across real threads needs owned `Arc` handles, which is a different shape than `Vm`'s exclusive-borrow design, the same trade `ConcurrentPool` already made against plain `MemoryPool` rather than unifying the two behind a trait. `vm::Vm` itself, and every test written against it, is untouched.
+
+**A real deadlock can now really happen, and resolving it surfaced a real subtlety the sequential demo's hand-built scenario never had to face.** Two real threads can genuinely, concurrently block on each other's resource — detected the same way (`WaitForGraph::detect_cycle`, unchanged) but by a watchdog racing against threads that are actually suspended, not inspecting a paused simulation. Force-releasing the victim's held resource (`ConcurrentTracker::force_release_all`, generalising the sequential demo's single hand-picked resource via the new `ResourceTracker::resources_held_by`) does not cancel the victim's own still-pending request — exactly as already documented for the sequential case — but a **real thread** keeps running past that point and will, in due course, try to release a resource that was already taken from it. A test built assuming `.unwrap()` on every release hung on first attempt; the fix is a task that tolerates `NotHolder` on release, the honest shape of a task that can survive preemption, which a hand-sequenced single-thread scenario never needed to model.
+
 ## What this deliberately does not build
 
 - **General arithmetic, comparisons, or an expression grammar.** A2 forbids the boolean predicate any general comparison (`==`, `<`, `>`) would need. `EVAL`/`RESONATE` remain the only two conditionals, exactly as before.
-- **True concurrency.** The batch runner is sequential, one program at a time. `ACQUIRE` blocking traps rather than pretending to schedule — stated above, not hidden.
-- **A derived privilege *policy*.** See directly above — what's built is the enforcement mechanism, not a claim about what should be protected or why.
+- **A derived privilege *policy*.** See "Privilege domains" above — what's built is the enforcement mechanism, not a claim about what should be protected or why.
+- **Deadlock resolution as part of this module.** `symphony_lang::concurrent` never resolves a cycle it detects — that stays application-level, the same detection/resolution boundary this whole workspace already keeps everywhere else. A caller wanting resolution runs its own watchdog against the same `ConcurrentTracker`, exactly as `neos/src/main.rs` now does.
 
 ## Binds
 
 - [[gates]] — `EVAL`/`RESONATE`/`SHIFT`, unchanged semantics
-- [[symphony-lang]] — `neos/symphony/lang/src/vm.rs`
+- [[symphony-lang]] — `neos/symphony/lang/src/vm.rs`, `neos/symphony/lang/src/concurrent.rs`
 - [[substrate]] — `MemoryPool::read`/`write`/`address_at`, real curved memory
+- [[symphony-kernel]] — `ConcurrentPool`, `ConcurrentTracker`, real shared state across threads

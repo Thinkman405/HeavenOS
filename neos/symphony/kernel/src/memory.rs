@@ -35,6 +35,7 @@
 //! the most concurrent implementation possible.
 
 use std::sync::{Arc, Mutex, MutexGuard};
+use lattice::AddressPath;
 use substrate::{Allocation, LatticeAddress, MemoryPool, SubstrateError};
 
 /// A `MemoryPool` safe to share across threads via [`Arc`].
@@ -77,6 +78,18 @@ impl ConcurrentPool {
 
     pub fn read(&self, at: LatticeAddress, len: usize) -> Result<Vec<u8>, SubstrateError> {
         self.lock().read(at, len)
+    }
+
+    /// The address at the start of the `n`-th cell in ring order — real
+    /// curved addressing, never a flat offset, same as the underlying
+    /// `MemoryPool` itself guarantees.
+    pub fn address_at(&self, n: usize) -> Option<LatticeAddress> {
+        self.lock().address_at(n)
+    }
+
+    /// Resolve a `⊗`-fold [`AddressPath`] to a real address in this pool.
+    pub fn resolve_path(&self, path: &AddressPath) -> Result<LatticeAddress, SubstrateError> {
+        self.lock().resolve_path(path)
     }
 
     pub fn available(&self) -> usize {

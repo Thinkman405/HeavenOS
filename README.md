@@ -8,7 +8,7 @@ A wave-based, finite, scalable, non-Euclidean operating system simulated atop Bo
 a Rust substrate driven by a quantized harmonic kernel.
 
 [![Rust](https://img.shields.io/badge/Rust-2021-CE422B?style=for-the-badge&logo=rust&logoColor=white)](neos/Cargo.toml)
-[![Tests](https://img.shields.io/badge/tests-472%20passing-2EC4B6?style=for-the-badge)](CONTEXT.md)
+[![Tests](https://img.shields.io/badge/tests-494%20passing-2EC4B6?style=for-the-badge)](CONTEXT.md)
 [![Subsystems](https://img.shields.io/badge/subsystems-7%2F7%20complete-6C5CE7?style=for-the-badge)](#subsystems)
 [![Doctrine](https://img.shields.io/badge/doctrine-physics--TDD-00B4D8?style=for-the-badge)](#the-doctrine)
 [![Status](https://img.shields.io/badge/status-active-2D3142?style=for-the-badge)](#status)
@@ -128,16 +128,19 @@ _mkb/ + _spec/  ──the factory, configured once──┐
 | [`gui`](subsystems/gui/CONTEXT.md) | `63` | ✅ complete |
 | [`crystallisation`](subsystems/crystallisation/CONTEXT.md) | `67` | ✅ complete |
 | *cross-cutting (geometric test bed)* | `7` | ✅ complete |
-| **Total** | **472** | **7 / 7** |
+| *cross-cutting (`media_ffi`, the C FFI bridge)* | `22` | ✅ complete |
+| **Total** | **494** | **7 / 7** |
 
 </div>
 
 Highlights that only exist because a subsystem's own limits were closed, not left as stated
 boundaries: real OS-thread concurrency (`symphony_lang::concurrent`), a genuine multi-tenant
 sandbox (`symphony_lang::sandbox::Sandbox`), a real radix-2 FFT replacing an `O((HW)²)` sum in
-`crystallisation`, and lock-free parallel media crystallization across real threads. Full detail,
-including every sabotage performed and what it caught, lives in each subsystem's own
-`CONTEXT.md`.
+`crystallisation`, lock-free parallel media crystallization across real threads, and a real C ABI
+bridge (`media_ffi`) exposing all four `crystallisation` pipelines — image, video, audio, text — to
+non-Rust callers, verified by compiling and running an independent C program against it, not just
+by inspection. Full detail, including every sabotage performed and what it caught, lives in each
+subsystem's own `CONTEXT.md`.
 
 <br>
 
@@ -183,13 +186,13 @@ Full narration of every step: [`CONTEXT.md`](CONTEXT.md#status-is-whatever-exist
 
 `HeavenOS` stays a pure core repo — no product-specific code lands here. Every product built on
 NEOS gets its own repository and pulls this one in as a **git submodule pinned to a tagged
-release** (`v0.1.0`, `v0.2.0`, ...), never to `main` directly, so a product only sees a change here
-once a release says it's ready.
+release**, never to `main` directly, so a product only sees a change here once a release says it's
+ready. Latest release: `v0.2.0`.
 
 ```bash
 git submodule add https://github.com/Thinkman405/HeavenOS.git vendor/heavenos
-cd vendor/heavenos && git checkout v0.1.0 && cd ../..
-git add vendor/heavenos && git commit -m "Add HeavenOS v0.1.0 as a submodule"
+cd vendor/heavenos && git checkout v0.2.0 && cd ../..
+git add vendor/heavenos && git commit -m "Add HeavenOS v0.2.0 as a submodule"
 ```
 
 Then copy [`_templates/product-repo/dependabot.yml`](_templates/product-repo/dependabot.yml) into
@@ -199,6 +202,9 @@ bumping the submodule pointer every time this repo cuts a new release, gated by 
 own CI, never a long-lived branch to drift.
 
 Full reasoning and step-by-step: [`_templates/product-repo/CONTEXT.md`](_templates/product-repo/CONTEXT.md).
+A real example following this exact setup:
+[Media-Framework-for-HeavenOS](https://github.com/Thinkman405/Media-Framework-for-HeavenOS), a
+video-only framework building a GStreamer element on top of `media_ffi`'s video bridge.
 
 <br>
 

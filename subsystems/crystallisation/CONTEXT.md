@@ -51,6 +51,8 @@ Sabotage: reversing the order handles are collected in (`handles.reverse()` befo
 
 Wired into the demo binary: the report's image, audio, and video crystallisation now run on three real, concurrently spawned OS threads rather than one after another — output is unchanged (confirmed by running the binary before and after), only the execution shape is.
 
+**A follow-up pass wired in the fourth pipeline the demo had never exercised: `linguistic::Crystal`.** It joins the other three as a fourth concurrent thread, crystallising a real two-line-break document. Running a genuine multi-break document through this path end-to-end for the first time — nothing before this had exercised `Crystal::crystallise` outside its own unit tests — surfaced a real, stale bug in `linguistic.rs`'s own module doc comment, not in the code: the worked table it shipped with claimed "about four" line breaks as the ceiling, with `break 2 -> 4.82843`, while the crate's own tests (`bifurcation_is_geometric_not_doubling`, `over_deep_document_is_refused`) already assert the real, exact values — a ceiling of **3**, and `2 (x) 2 = 20.970562748477143` — and the live demo run agrees with the tests, not the comment. Fixed the comment to state the tested values directly, computed via a disposable scratch check rather than re-derived by hand.
+
 ## A sibling of `ftg`, not a child
 
 The PRD frames §8 as Layer 7 of the FTG, which invites the assumption that this record depends on transport. **It does not.**

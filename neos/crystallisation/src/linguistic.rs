@@ -6,21 +6,26 @@
 //!
 //! ## Documents are shallow, for the same reason addresses are
 //!
-//! Each line break is an A1 bifurcation, scaling extent by `u (x) u`. Iterating
-//! `(x)` from unit extent:
+//! Each line break is an A1 bifurcation, scaling extent by **self**-`(x)`
+//! (`extent <- extent (x) extent`, not a unit step) — squaring the product
+//! each time rather than incrementing it, so this leaves `(x)`'s domain one
+//! step sooner than the unit-step iteration `lattice`'s curved addressing
+//! uses. Real values, confirmed directly rather than estimated:
 //!
 //! ```text
 //! break 1 -> 2.0
-//! break 2 -> 4.82843
-//! break 3 -> 40.0726
-//! break 4 -> 1.09089e15
-//! break 5 -> REFUSED
+//! break 2 -> 20.970562748477143
+//! break 3 -> ~1.07e177
+//! break 4 -> REFUSED
 //! ```
 //!
-//! **About four line breaks.** This is the *same* ceiling measured in
-//! `lattice`'s curved addressing, and it is not a coincidence: `(x)` grows
+//! **Exactly three line breaks**, not four — [`Crystal::max_bifurcations`] is
+//! computed from the real operator rather than hardcoded, precisely so this
+//! number tracks the law instead of a stale guess about it. Same systemic
+//! cause as the unit-step ceiling elsewhere in this workspace (`(x)` grows
 //! super-exponentially against a fixed domain, so **every** subsystem that
-//! iterates it inherits the limit. The constraint is systemic.
+//! iterates it inherits some limit), but a different arity gives a different
+//! number — the two ceilings must not be conflated.
 //!
 //! An over-deep document is **refused**, never truncated - losing content
 //! silently would be worse than declining to crystallise it.

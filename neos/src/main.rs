@@ -27,7 +27,9 @@ mod render;
 const WAVE_K: f64 = 1.2;
 const WAVE_OMEGA: f64 = 3.0;
 
-use crystallisation::{takens_embed, FrequencyMap, PhaseSpaceVector, PixelGrid, VolumetricTimeCrystal};
+use crystallisation::{
+    takens_embed, Crystal, FrequencyMap, PhaseSpaceVector, PixelGrid, VolumetricTimeCrystal,
+};
 use ftg::session::{Link, Oscillator};
 use ftg::transport::{Delivery, Gateway, Packet};
 use ftg::Frame;
@@ -112,6 +114,16 @@ fn embedded_video_frames() -> Vec<PixelGrid> {
                 .expect("rescaling keeps the frame's already-valid dimensions")
         })
         .collect()
+}
+
+/// A short, real multi-line document — not code, but the same pipeline PRD
+/// §8 says treats them identically, since both are just line-broken
+/// character strings. Two line breaks, deliberately: `linguistic.rs`'s own
+/// module docs give the exact extent this should reach after each one
+/// (`1.0 -> 2.0 -> 4.82843`), so this doubles as a live check that the demo
+/// binary's own real run agrees with the documented worked example.
+fn embedded_text() -> &'static str {
+    "NEOS is running\nseven subsystems, one substrate\nwave-based, not boolean"
 }
 
 /// The loudest moment across a set of phase-space nodes: whichever single
@@ -638,15 +650,15 @@ fn main() {
         Delivery::LinkLost { hop, .. } => println!("  link lost      at hop {hop}"),
     }
 
-    // ---- crystallisation: image, audio, and video, crystallised concurrently
+    // ---- crystallisation: image, audio, video, and text, all concurrent --
     //
-    // Three genuinely independent pipelines — nothing here shares state, so
+    // Four genuinely independent pipelines — nothing here shares state, so
     // there is nothing to synchronise, only real throughput to gain. See
     // `crystallisation::parallel`'s own module docs: every pipeline in that
     // crate is a pure function over owned data, which is what makes this
     // safe with zero locks. `crystallize_images`/`embed_audio`/
     // `crystallize_videos` handle the general batch case (many of one media
-    // type); this demo's own three *different* media types are spawned
+    // type); this demo's own four *different* media types are spawned
     // directly, one real OS thread each.
     let image_thread = thread::spawn(|| {
         let grid = crystallisation::decode_ppm(&embedded_ppm()).expect("well-formed embedded PPM");
@@ -667,6 +679,8 @@ fn main() {
             .expect("rescaled embedded frames fit the quantisable ceiling");
         (frame_count, vtc)
     });
+    let text_thread =
+        thread::spawn(|| Crystal::crystallise(embedded_text()).expect("well under the four-break ceiling"));
 
     let (grid, faces) = image_thread
         .join()
@@ -677,8 +691,11 @@ fn main() {
     let (frame_count, vtc) = video_thread
         .join()
         .expect("the video crystallization thread must not panic");
+    let document = text_thread
+        .join()
+        .expect("the linguistic crystallization thread must not panic");
 
-    println!("\ncrystallisation (image, audio, video — three real threads, not sequential)");
+    println!("\ncrystallisation (image, audio, video, text — four real threads, not sequential)");
     println!(
         "  decoded        {}x{} image, {} bytes -> {} face(s)",
         grid.width(),
@@ -698,6 +715,13 @@ fn main() {
         vtc.nodes().len(),
         vtc.input_energy(),
         vtc.is_energy_conserving()
+    );
+    println!(
+        "  crystallised   {} chars, {} line break(s) -> {} harmonic node(s), extent {:.5}",
+        embedded_text().chars().filter(|&c| c != '\n').count(),
+        document.bifurcations(),
+        document.len(),
+        document.extent()
     );
 
     // ---- gui: read the running state into standing-wave amplitudes -----

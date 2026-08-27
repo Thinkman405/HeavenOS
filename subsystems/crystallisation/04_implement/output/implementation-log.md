@@ -332,3 +332,28 @@ Reverted after confirming; full suite re-confirmed at 5/5 in this file, 472/472 
 ## Human check
 
 Read `parallel_image_crystallization_preserves_input_order_even_when_jobs_finish_out_of_order` alongside `parallel_image_crystallization_matches_sequential_bit_for_bit` — the second alone would pass even if results were collected by arrival order rather than input order, since same-size jobs give real threads no reason to finish in any particular sequence. The first is the one that actually forces the distinction.
+
+---
+
+# Addendum — wiring the fourth pipeline (`linguistic::Crystal`) into the demo
+
+```
+cargo build --workspace  → Finished, no warnings
+cargo test  --workspace  → 472 passed; 0 failed (unchanged — this pass added no new tests)
+```
+
+`linguistic::Crystal` was the one media pipeline never exercised outside its own unit tests: image, audio, and video all reported in `neos/src/main.rs`, text never did. Closed the same way as the parallel-crystallization work above: `Crystal::crystallise` joins the other three as a fourth `std::thread::spawn`'d job on a real two-line-break document (`"NEOS is running\nseven subsystems, one substrate\nwave-based, not boolean"`), joined alongside them.
+
+## A real bug found by finally running the real path
+
+Picking the demo text deliberately used two line breaks so the printed extent could double as a live check against `linguistic.rs`'s own module doc comment, which states a worked table of bifurcation-extent values. The demo printed `20.97056`; the doc comment's table says two breaks gives `4.82843`. Before assuming the code was wrong, checked the crate's own tests first: `tests/crystallisation.rs`'s `bifurcation_is_geometric_not_doubling` asserts `(c.extent() - 20.970_562_748_477_143).abs() < 1e-9` for exactly this case, and `over_deep_document_is_refused`/`bifurcation_ceiling_is_derived_from_the_operator` both assert the real ceiling is **3**, not the doc comment's "about four." The code and its tests already agree with each other and with the live demo run; the module doc comment was the thing that was wrong — a stale worked example, not a defect anyone had reason to notice before a real multi-break document actually ran through this exact path end to end.
+
+Confirmed the correct values with a disposable scratch harness (`neos/crystallisation/examples/scratch_extent_check.rs`, deleted after use) iterating the real `lattice::LatticeScalar::otimes` self-composition directly: `break 1 -> 2.0`, `break 2 -> 20.9705627485`, `break 3 -> ~1.07e177`, `break 4 -> REFUSED` — matching the tests exactly. Fixed `linguistic.rs`'s module doc comment to state these values and the real ceiling of 3, rather than the stale table.
+
+## Wired into the demo
+
+`neos/src/main.rs`'s crystallisation section header now reads "image, audio, video, text — four real threads, not sequential," and a fourth print line reports character count, line-break count, harmonic-node count, and the real extent for the embedded document.
+
+## Human check
+
+Read the fixed `linguistic.rs` module doc comment alongside `tests/crystallisation.rs`'s `bifurcation_is_geometric_not_doubling` and `over_deep_document_is_refused` — the comment now states exactly what those two tests already prove, instead of a table that predates whatever changed (or was never verified) upstream of it.

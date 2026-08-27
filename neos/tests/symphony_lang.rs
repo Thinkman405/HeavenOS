@@ -16,8 +16,8 @@ use symphony_kernel::{
 use symphony_lang::concurrent::run_batch_concurrent;
 use symphony_lang::vm::{compile, Instruction, ResourceOutcome, Vm, VmFault};
 use symphony_lang::{
-    execute, execute_with, lex, parse, run, Address, Alignment, Domain, LangError, RuntimeTask,
-    Stmt, TrapAction, REFERENCE_SCALE,
+    execute, execute_with, lex, parse, run, Address, Alignment, Domain, LangError, Owner,
+    RuntimeTask, Sandbox, SandboxError, Stmt, TrapAction, REFERENCE_SCALE,
 };
 
 // ---------------------------------------------------------------- A2: syntax
@@ -1710,4 +1710,150 @@ fn privilege_domains_are_enforced_across_real_concurrent_threads() {
         outcomes[0].trap
     );
     assert!(outcomes[1].trap.is_none(), "the trusted program must be unaffected");
+}
+
+// ------------------------------------------------ genuine multi-tenant sandbox
+
+/// The positive case first: a tenant admitted to a cell must actually be
+/// able to use it. A sandbox that refused everyone would trivially "isolate"
+/// tenants from each other by isolating them from all memory.
+#[test]
+fn a_tenant_can_freely_use_its_own_admitted_memory() {
+    let sandbox = Sandbox::new(4, 64);
+    let own_cell = sandbox.pool().address_at(1).unwrap().cell();
+    sandbox.admit_tenant(TaskId(0), [own_cell]).unwrap();
+
+    let source = "task mine at 42 hz phase +\nstore mine at cell 1\nload back at cell 1";
+    let instructions = compile(&parse(&lex(source).unwrap()).unwrap());
+    let outcome = sandbox.run(TaskId(0), &instructions);
+
+    assert!(
+        outcome.trap.is_none(),
+        "a tenant must be able to use its own admitted memory: {:?}",
+        outcome.trap
+    );
+    assert_eq!(outcome.declared["back"].frequency(), 42.0);
+}
+
+/// The actual sandboxing claim: tenant 0, reaching for a cell admitted to
+/// tenant 1, is refused — the same real `PrivilegeViolation` mechanism
+/// `Domain::Guest` already uses, now keyed per tenant rather than per a
+/// single global guest/kernel split.
+#[test]
+fn a_tenant_cannot_touch_another_tenants_memory() {
+    let sandbox = Sandbox::new(4, 64);
+    let cell_a = sandbox.pool().address_at(0).unwrap().cell();
+    let cell_b = sandbox.pool().address_at(1).unwrap().cell();
+    sandbox.admit_tenant(TaskId(0), [cell_a]).unwrap();
+    sandbox.admit_tenant(TaskId(1), [cell_b]).unwrap();
+
+    let source = "task intruder at 1 hz phase +\nstore intruder at cell 1";
+    let instructions = compile(&parse(&lex(source).unwrap()).unwrap());
+    let outcome = sandbox.run(TaskId(0), &instructions);
+
+    assert!(
+        matches!(outcome.trap, Some(VmFault::PrivilegeViolation { cell, .. }) if cell == cell_b),
+        "tenant 0 must be refused from tenant 1's memory, got {:?}",
+        outcome.trap
+    );
+}
+
+/// Admission itself has a real invariant: it must never let a later
+/// admission silently take a cell the kernel already claimed.
+#[test]
+fn admitting_a_tenant_to_an_already_kernel_owned_cell_is_refused() {
+    let sandbox = Sandbox::new(4, 64);
+    let cell = sandbox.pool().address_at(0).unwrap().cell();
+    sandbox.reserve_kernel_cells([cell]).unwrap();
+
+    let err = sandbox.admit_tenant(TaskId(0), [cell]).unwrap_err();
+    assert_eq!(err, SandboxError::CellAlreadyOwned { cell, by: Owner::Kernel });
+}
+
+/// Nor let a second tenant silently take a cell the first tenant already
+/// holds — the admission-time check, not just the run-time one, is what
+/// makes ownership exclusive rather than first-write-wins.
+#[test]
+fn admitting_two_different_tenants_to_the_same_cell_is_refused() {
+    let sandbox = Sandbox::new(4, 64);
+    let cell = sandbox.pool().address_at(0).unwrap().cell();
+    sandbox.admit_tenant(TaskId(0), [cell]).unwrap();
+
+    let err = sandbox.admit_tenant(TaskId(1), [cell]).unwrap_err();
+    assert_eq!(
+        err,
+        SandboxError::CellAlreadyOwned {
+            cell,
+            by: Owner::Tenant(TaskId(0))
+        }
+    );
+}
+
+/// Re-admitting a tenant to memory it already owns is a no-op, not a
+/// conflict — nothing was taken from anyone.
+#[test]
+fn re_admitting_a_tenant_to_its_own_cells_is_not_an_error() {
+    let sandbox = Sandbox::new(4, 64);
+    let cell = sandbox.pool().address_at(0).unwrap().cell();
+    sandbox.admit_tenant(TaskId(0), [cell]).unwrap();
+    sandbox
+        .admit_tenant(TaskId(0), [cell])
+        .expect("re-admitting a tenant to memory it already owns must not fail");
+}
+
+/// The actual multi-tenant claim, exercised the way it matters: several
+/// tenants' programs running **concurrently**, one real OS thread each,
+/// each proven able to use its own admitted memory and simultaneously
+/// refused from every other tenant's — not verified one tenant at a time,
+/// which real preemption in this workspace has already shown can hide bugs
+/// a purely sequential check cannot surface (see
+/// `two_real_threads_deadlock_and_the_watchdog_resolves_it` in
+/// `symphony_scheduler.rs`).
+#[test]
+fn tenants_run_concurrently_and_stay_isolated_under_real_contention() {
+    let sandbox = Sandbox::new(8, 64);
+    let tenants = 3usize;
+    for t in 0..tenants {
+        let cells = [
+            sandbox.pool().address_at(2 * t).unwrap().cell(),
+            sandbox.pool().address_at(2 * t + 1).unwrap().cell(),
+        ];
+        sandbox.admit_tenant(TaskId(t as u64), cells).unwrap();
+    }
+
+    let programs: Vec<_> = (0..tenants)
+        .map(|t| {
+            let own = 2 * t;
+            let other = 2 * ((t + 1) % tenants);
+            let freq = 300.0 + t as f64;
+            let source = format!(
+                "task mine at {freq} hz phase +\n\
+                 store mine at cell {own}\n\
+                 load back at cell {own}\n\
+                 store mine at cell {other}"
+            );
+            let instructions = compile(&parse(&lex(&source).unwrap()).unwrap());
+            (TaskId(t as u64), instructions)
+        })
+        .collect();
+
+    let outcomes = sandbox.run_many(programs);
+    assert_eq!(outcomes.len(), tenants);
+    for (t, outcome) in outcomes.iter().enumerate() {
+        assert_eq!(
+            outcome.declared["back"].frequency(),
+            300.0 + t as f64,
+            "tenant {t} could not read back its own admitted memory under real concurrency"
+        );
+        let other = 2 * ((t + 1) % tenants);
+        let other_cell = sandbox.pool().address_at(other).unwrap().cell();
+        match &outcome.trap {
+            Some(VmFault::PrivilegeViolation { cell, .. }) => {
+                assert_eq!(*cell, other_cell, "tenant {t} was refused the wrong cell");
+            }
+            other => panic!(
+                "tenant {t} should have been refused from another tenant's memory, got {other:?}"
+            ),
+        }
+    }
 }

@@ -47,7 +47,7 @@ use symphony_kernel::{
 use symphony_lang::concurrent::run_batch_concurrent;
 use symphony_lang::vm::{compile as lang_compile, Vm as LangVm};
 use symphony_lang::{
-    lex as lang_lex, parse as lang_parse, Domain as LangDomain, TrapAction as LangTrapAction,
+    lex as lang_lex, parse as lang_parse, Domain as LangDomain, Sandbox, TrapAction as LangTrapAction,
 };
 
 /// A tiny real PPM (P5, greyscale), not a hand-built `FrequencyMap` — the
@@ -549,6 +549,60 @@ fn main() {
     assert!(
         all_consistent,
         "real mutual exclusion must prevent any thread's store/load from interleaving with another's"
+    );
+
+    // ---- symphony-lang: a genuine multi-tenant sandbox -------------------
+    //
+    // `Domain::Guest` alone only says "trusted or not" — every guest shares
+    // the same restricted region. `Sandbox` adds a per-tenant ownership map
+    // over `run_batch_concurrent`'s same real threads, so *which* memory is
+    // off-limits differs per tenant: three mutually untrusted programs run
+    // **at the same time**, each provably able to use only its own admitted
+    // cells, and each provably refused when it reaches for another tenant's.
+    let sandbox = Sandbox::new(8, 64);
+    let tenants = 3usize;
+    for t in 0..tenants {
+        let cells = [
+            sandbox.pool().address_at(2 * t).unwrap().cell(),
+            sandbox.pool().address_at(2 * t + 1).unwrap().cell(),
+        ];
+        sandbox
+            .admit_tenant(TaskId(3000 + t as u64), cells)
+            .expect("each tenant is admitted to memory nobody else holds yet");
+    }
+    let sandbox_programs: Vec<_> = (0..tenants)
+        .map(|t| {
+            let own = 2 * t;
+            let other = 2 * ((t + 1) % tenants);
+            let freq = 400.0 + t as f64;
+            let source = format!(
+                "task mine at {freq} hz phase +\nstore mine at cell {own}\nload back at cell {own}\nstore mine at cell {other}"
+            );
+            let instructions = lang_compile(&lang_parse(&lang_lex(&source).unwrap()).unwrap());
+            (TaskId(3000 + t as u64), instructions)
+        })
+        .collect();
+    let sandbox_outcomes = sandbox.run_many(sandbox_programs);
+    let each_kept_its_own = sandbox_outcomes
+        .iter()
+        .enumerate()
+        .all(|(t, o)| o.declared["back"].frequency() == 400.0 + t as f64);
+    let each_refused_from_the_others =
+        sandbox_outcomes.iter().all(|o| {
+            matches!(o.trap, Some(symphony_lang::VmFault::PrivilegeViolation { .. }))
+        });
+    println!("\nsymphony-lang: a genuine multi-tenant sandbox");
+    println!(
+        "  admitted       {tenants} tenants, 2 cells each, running concurrently on real threads"
+    );
+    println!("  own memory     each tenant read back its own store: {each_kept_its_own}");
+    println!(
+        "  isolation      each tenant refused from every other tenant's memory: {each_refused_from_the_others}"
+    );
+    assert!(each_kept_its_own, "a tenant must be able to use its own admitted memory");
+    assert!(
+        each_refused_from_the_others,
+        "a tenant must never be able to touch another tenant's admitted memory"
     );
 
     // ---- ftg: deliver a real frame over a resonant session --------------

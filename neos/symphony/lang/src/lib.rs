@@ -76,11 +76,23 @@
 //! same, undamaged shared state. No new expression grammar, no arithmetic, no
 //! privilege domains — see `_mkb/instruction_set.md` for exactly what was
 //! composed and what was deliberately left out.
+//!
+//! ## A genuine multi-tenant sandbox
+//!
+//! [`sandbox::Sandbox`] composes [`concurrent::run_program`]'s real threads
+//! with a per-tenant ownership map over cells, so several mutually
+//! untrusted `symphony-lang` programs can run at the same time against one
+//! real shared pool, each provably unable to touch another's admitted
+//! memory. `Domain::Guest` alone only distinguishes trusted from untrusted;
+//! `Sandbox` distinguishes whose untrusted memory is whose. See the module
+//! docs for exactly what it does and does not isolate (memory: yes;
+//! resource ids: a shared namespace, stated rather than hidden).
 
 pub mod concurrent;
 pub mod interpreter;
 pub mod lexer;
 pub mod parser;
+pub mod sandbox;
 pub mod vm;
 
 use std::fmt;
@@ -90,6 +102,7 @@ pub use interpreter::{
 };
 pub use lexer::lex;
 pub use parser::{parse, Address, Alignment, Stmt, REFERENCE_SCALE};
+pub use sandbox::{Owner, Sandbox, SandboxError};
 pub use vm::{compile, Domain, Instruction, ProgramOutcome, TrapAction, Vm, VmFault};
 
 /// Named for the failure, per `_mkb/test-doctrine.md`.

@@ -512,3 +512,48 @@ Detailed fully in `symphony_kernel`'s own log (`ConcurrentTracker::force_release
 ## Human check
 
 Read the "real deadlock" section above alongside `symphony_kernel`'s own addendum for `ConcurrentTracker` — the bug that surfaced (a preempted task's own thread trying to release what was already taken from it) is the kind of thing that is structurally impossible to discover from a hand-sequenced single-thread scenario, since there IS no "the victim's thread keeps running" when there's only ever been one thread. It took real concurrency to exist before it could be found.
+
+---
+
+# Addendum — a genuine multi-tenant sandbox (`sandbox::Sandbox`)
+
+```
+cargo build --workspace  → Finished, no warnings
+cargo test  --workspace  → 460 passed; 0 failed
+cargo test  -p symphony-lang --test symphony_lang → 78 passed
+```
+
+Workspace total: **453 → 460**. `symphony_lang`'s own integration file: 72 → 78.
+
+Prompted directly: "the important importance of a genuine multi-tenant sandbox" was answered first, in text only — real multithreading turns three already-built pieces (`Domain::Guest`, `ConcurrentPool`, `ConcurrentTracker`) into an actual, provable multi-tenant isolation claim rather than a sequential simulation of one, citing the real `NotHolder` preemption bug found while building Slice 4 as concrete evidence that genuine concurrency surfaces failure modes a single-threaded "sandbox" cannot. The next message asked for it built.
+
+## Checked against `_mkb/` first, same as every other slice
+
+No axiom or law names tenancy, isolation levels, or per-principal memory ownership — expected, since the corpus doesn't operate at that layer. But unlike Phase 4's privilege domains, this did **not** need a new stated-convention section: the mechanism composes entirely from things already built and already labelled. `Domain::Guest`/`Vm::reserve_cells` are the privilege *mechanism* (stated convention, Slice 3); `concurrent::run_program` is the real-thread *scheduler* (composed, Slice 4). Neither needed to change. `Sandbox` is a new module that calls both, unmodified.
+
+## The actual design move: compute the reserved set per call, not per program
+
+The naive approach would extend `concurrent::run_program`'s signature to take a `HashMap<CellId, Owner>` instead of a flat `HashSet<CellId>`, teaching the dispatch loop itself about tenancy. Rejected in favour of a smaller, lower-risk move: `Sandbox` keeps the ownership map privately, and for each tenant about to run, computes `off_limits_for(tenant)` — every cell owned by the kernel or by any *other* tenant — as an ordinary `HashSet<CellId>`, then calls `concurrent::run_program` exactly as `neos/tests/symphony_lang.rs`'s existing concurrency tests already do, with `Domain::Guest` fixed and that computed set as `reserved`. Zero lines of `concurrent.rs` changed. The already-real, already-tested `PrivilegeViolation` check does all the enforcement; `Sandbox` only ever decides, per tenant, per call, what that check's input set should be.
+
+This is the same category of finding as Slice 2's "the derivations were already in the constants file" — the enforcement point this feature needed already existed; what was missing was a way to compute *which* set to hand it, per tenant instead of globally.
+
+## A real, stated limit: resource ids are not tenant-scoped
+
+Considered and explicitly declined: remapping each tenant's `Acquire`/`Release` resource ids into a private per-tenant namespace (e.g. hashing `(tenant, resource)` into a global id) so two tenants could never collide on a literal resource id by accident. Not built, for the same reason a derived privilege *policy* was left to the caller in Slice 3: whether two tenants sharing a resource id is intentional (a resource meant to be genuinely shared) or accidental is a policy question `Sandbox` has no basis to answer, and guessing wrong either way (silently isolating a resource meant to be shared, or silently allowing a collision meant to be isolated) would be worse than stating the limit. Recorded in `_mkb/instruction_set.md` and this record's own CONTEXT.md rather than left implicit.
+
+## Doctrine checks — two performed
+
+| Sabotage | Result |
+|---|---|
+| `off_limits_for`'s ownership filter inverted (`owner == Owner::Tenant(tenant)` instead of `!=`) | **3 of 78 failed** — `a_tenant_can_freely_use_its_own_admitted_memory` (refused its own memory instead), `a_tenant_cannot_touch_another_tenants_memory` (let through instead of refused), `tenants_run_concurrently_and_stay_isolated_under_real_contention` (panicked on a missing `declared["back"]` key, since the tenant's own store was wrongly refused before the load could run) |
+| `admit`'s pre-write conflict check removed, so a later admission silently overwrites an earlier owner | **2 of 78 failed** — `admitting_a_tenant_to_an_already_kernel_owned_cell_is_refused` and `admitting_two_different_tenants_to_the_same_cell_is_refused`, both `unwrap_err()` on an `Ok(())` |
+
+Both reverted after confirming; full suite re-confirmed at 78/78, 460/460 workspace-wide. The first sabotage is the sharper of the two: an inverted filter doesn't just fail to isolate tenants from each other, it actively refuses each tenant its *own* memory while letting every other tenant in — a real security-relevant regression, not a silent no-op, and the concurrent test's panic (rather than a clean assertion failure) is itself informative: a broken ownership check doesn't fail gracefully under real contention, it corrupts the program's own state enough to panic on a lookup.
+
+## Wired into the demo
+
+`neos/src/main.rs` gained a `symphony-lang: a genuine multi-tenant sandbox` section: three tenants, each admitted to its own pair of cells, all three running **concurrently** via `Sandbox::run_many`, each storing and reading back its own frequency while also reaching for the next tenant's first cell and being refused — printed and asserted, not just silently exercised.
+
+## Human check
+
+Read `a_tenant_cannot_touch_another_tenants_memory` alongside `tenants_run_concurrently_and_stay_isolated_under_real_contention` — the first proves the check exists at all; the second proves it holds when three tenants are actually racing on real OS threads against one shared pool at the same time, which is the only form of the claim "genuine multi-tenant sandbox" actually makes.

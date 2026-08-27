@@ -84,15 +84,24 @@ This is composition, the same category as Phases 1-3, not a Phase-4-style stated
 
 **A real deadlock can now really happen, and resolving it surfaced a real subtlety the sequential demo's hand-built scenario never had to face.** Two real threads can genuinely, concurrently block on each other's resource — detected the same way (`WaitForGraph::detect_cycle`, unchanged) but by a watchdog racing against threads that are actually suspended, not inspecting a paused simulation. Force-releasing the victim's held resource (`ConcurrentTracker::force_release_all`, generalising the sequential demo's single hand-picked resource via the new `ResourceTracker::resources_held_by`) does not cancel the victim's own still-pending request — exactly as already documented for the sequential case — but a **real thread** keeps running past that point and will, in due course, try to release a resource that was already taken from it. A test built assuming `.unwrap()` on every release hung on first attempt; the fix is a task that tolerates `NotHolder` on release, the honest shape of a task that can survive preemption, which a hand-sequenced single-thread scenario never needed to model.
 
+## A genuine multi-tenant sandbox — `symphony_lang::sandbox::Sandbox`
+
+Composition again, not a third stated convention. Privilege domains (above) are two-valued — `Kernel`/`Guest` — so every guest program is refused the same fixed region as every other guest; that is a privilege distinction, not a tenancy one. `Sandbox` closes the gap named in this crate's own answer to "what can real concurrency be used for": several mutually untrusted `symphony-lang` programs actually sharing one real substrate, each provably unable to touch another's memory, not just unable to touch the kernel's.
+
+The mechanism is a `CellId -> Owner` map (`Owner::Kernel` or `Owner::Tenant(TaskId)`), checked entirely outside the privilege boundary itself: for each tenant about to run, `Sandbox` computes the set of cells *everyone else* owns (the kernel's, plus every other tenant's) and hands that to `Domain::Guest`'s already-real, already-tested `PrivilegeViolation` check via `concurrent::run_program`, completely unchanged. No new enforcement point was written — the same check that already distinguishes trusted from untrusted now distinguishes, per call, whose untrusted memory this particular tenant may not touch. `Sandbox::run_many` runs every tenant on its own real OS thread against one shared `ConcurrentPool`/`ConcurrentTracker`, the same real-concurrency discipline `symphony_lang::concurrent` already established — isolation asserted only against a single tenant running alone would not be the same claim.
+
+**A real, stated limit, not glossed over:** `ResourceId`s are a shared namespace across tenants. Memory ownership is exclusive per tenant; resource ids are not remapped or scoped per tenant, so two tenants that acquire the same literal resource id genuinely contend with each other through the one real `ConcurrentTracker` — which may be an intentional shared resource or an accidental collision, and `Sandbox` does not attempt to guess which. A host wanting per-tenant resource namespaces has to arrange that itself.
+
 ## What this deliberately does not build
 
 - **General arithmetic, comparisons, or an expression grammar.** A2 forbids the boolean predicate any general comparison (`==`, `<`, `>`) would need. `EVAL`/`RESONATE` remain the only two conditionals, exactly as before.
 - **A derived privilege *policy*.** See "Privilege domains" above — what's built is the enforcement mechanism, not a claim about what should be protected or why.
 - **Deadlock resolution as part of this module.** `symphony_lang::concurrent` never resolves a cycle it detects — that stays application-level, the same detection/resolution boundary this whole workspace already keeps everywhere else. A caller wanting resolution runs its own watchdog against the same `ConcurrentTracker`, exactly as `neos/src/main.rs` now does.
+- **Per-tenant resource namespacing.** See "A genuine multi-tenant sandbox" above — `Sandbox` isolates memory, not resource ids.
 
 ## Binds
 
 - [[gates]] — `EVAL`/`RESONATE`/`SHIFT`, unchanged semantics
-- [[symphony-lang]] — `neos/symphony/lang/src/vm.rs`, `neos/symphony/lang/src/concurrent.rs`
+- [[symphony-lang]] — `neos/symphony/lang/src/vm.rs`, `neos/symphony/lang/src/concurrent.rs`, `neos/symphony/lang/src/sandbox.rs`
 - [[substrate]] — `MemoryPool::read`/`write`/`address_at`, real curved memory
 - [[symphony-kernel]] — `ConcurrentPool`, `ConcurrentTracker`, real shared state across threads

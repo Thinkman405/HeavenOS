@@ -5,12 +5,12 @@ tier: 2
 language: custom DSL
 stage: 04_implement
 status: complete
-result: "72 tests passing. Lexer, parser, interpreter. All three of PRD 3's geometric gates. A2 enforced by refusing to tokenise Boolean constructs; the TaskModel seam is closed. A second execution engine (vm) compiles the same grammar into a flat, program-counter-addressed instruction sequence with real store/load through substrate::MemoryPool (both cell-ordinal and real ⊗-fold path addressing) and real acquire/release through symphony_kernel::resources, isolating a runtime fault per program rather than per Rust process. vm::Vm::run_program_trapped adds real dynamic fault routing on top — a handler called on every memory fault with &mut MemoryPool, able to retry the exact faulting instruction, the direct language-level counterpart to substrate::Hypervisor::allocate_trapped. vm::Domain/Vm::reserve_cells add privilege domains as a stated engineering convention (explicitly not law, since none exists) enforced at the resolved address. A third engine, concurrent::run_program/run_batch_concurrent, closes vm's stated 'no scheduler' limit for real: real OS threads sharing a real symphony_kernel::ConcurrentPool/ConcurrentTracker, blocking acquire verified by timing an actual wait."
+result: "78 tests passing. Lexer, parser, interpreter. All three of PRD 3's geometric gates. A2 enforced by refusing to tokenise Boolean constructs; the TaskModel seam is closed. A second execution engine (vm) compiles the same grammar into a flat, program-counter-addressed instruction sequence with real store/load through substrate::MemoryPool (both cell-ordinal and real ⊗-fold path addressing) and real acquire/release through symphony_kernel::resources, isolating a runtime fault per program rather than per Rust process. vm::Vm::run_program_trapped adds real dynamic fault routing on top — a handler called on every memory fault with &mut MemoryPool, able to retry the exact faulting instruction, the direct language-level counterpart to substrate::Hypervisor::allocate_trapped. vm::Domain/Vm::reserve_cells add privilege domains as a stated engineering convention (explicitly not law, since none exists) enforced at the resolved address. A third engine, concurrent::run_program/run_batch_concurrent, closes vm's stated 'no scheduler' limit for real: real OS threads sharing a real symphony_kernel::ConcurrentPool/ConcurrentTracker, blocking acquire verified by timing an actual wait. sandbox::Sandbox composes that same real concurrency with a per-tenant CellId->Owner ownership map into a genuine multi-tenant sandbox: several mutually untrusted programs run at once, each provably confined to its own admitted memory."
 prd_sections: ["3"]
 binds_axioms: ["A1", "A2", "A3"]
 split_from: symphony
 consumes: [symphony-kernel, substrate, lattice]
-slices: ["lexer + parser + interpreter, interference gate", "phase shift and scale modulation gates", "the instruction-executing state machine (vm)", "real concurrency (concurrent)"]
+slices: ["lexer + parser + interpreter, interference gate", "phase shift and scale modulation gates", "the instruction-executing state machine (vm)", "real concurrency (concurrent)", "a genuine multi-tenant sandbox (sandbox)"]
 ---
 
 # Symphony-lang — the kernel DSL
@@ -88,7 +88,15 @@ Verified before being trusted: the flat dispatcher must produce **exactly** the 
 
 **A real deadlock can now really happen, and resolving it surfaced a genuine subtlety the sequential demo never had to face.** `ConcurrentTracker::force_release_all` (backed by a new `ResourceTracker::resources_held_by`) generalises the sequential demo's hand-picked "the victim holds exactly this one resource" into "release everything the victim currently holds" — necessary once the scenario isn't known in advance. The first version of the real-threads deadlock test had each philosopher `.unwrap()` its own `release` calls and hung on first run: after the watchdog force-releases the victim's one held fork, the victim's *own thread keeps running* and eventually reaches its own `release` call for that exact fork — which it no longer holds, so `NotHolder` fires, and `.unwrap()` turns that into a panic mid-thread, which stalls the whole test on `join()`. A hand-sequenced single-thread scenario never has to reckon with the victim's own control flow continuing past the point it was preempted; a real thread does. Fixed by having each philosopher tolerate `NotHolder` on release (`let _ = tracker.release(...)`) — the honest shape of a task written to survive real preemption, not a workaround.
 
-## Doctrine checks — ten performed
+## Slice 5 — a genuine multi-tenant sandbox (`sandbox`), composing rather than adding a new check
+
+Slice 4's own answer to "what does real concurrency buy this crate" named the thing directly: *"a genuine multi-tenant sandbox — several untrusted symphony-lang programs actually running in parallel against shared curved memory."* `sandbox::Sandbox` builds exactly that, and — checked against `_mkb/` first, same discipline as every other capability in this record — needed no new law and no new enforcement point to do it. `vm::Domain`/`Vm::reserve_cells` are two-valued (`Kernel`/`Guest`): every guest shares the *same* restricted region as every other guest, which is a privilege distinction, not a tenancy one. `Sandbox` adds a `CellId -> Owner` map (`Owner::Kernel` or `Owner::Tenant(TaskId)`) entirely *outside* the privilege check itself: for the tenant about to run, it computes the set of cells everyone else owns and hands that set to `Domain::Guest`'s already-real `PrivilegeViolation` check via `concurrent::run_program`, byte-for-byte unchanged. `Sandbox::run_many` runs every tenant on its own real OS thread against one shared `ConcurrentPool`/`ConcurrentTracker` — the same real-concurrency discipline Slice 4 established, not a second one.
+
+**A real, stated limit, recorded rather than hidden:** `ResourceId`s are a shared namespace across tenants. `Sandbox` does not remap or scope resource ids per tenant, so two tenants that happen to `acquire` the same literal id genuinely contend with each other through the one real `ConcurrentTracker` — intentional if the resource is meant to be shared, a genuine collision otherwise, and `Sandbox` does not attempt to tell the two apart. See `_mkb/instruction_set.md` for the full statement.
+
+Admission is exclusive and checked before any ownership is written: `admit_tenant`/`reserve_kernel_cells` refuse — leaving the map exactly as it was — if any requested cell is already owned by anyone else, so a later admission can never silently steal an earlier tenant's memory. Re-admitting a tenant to cells it already owns is a no-op, not an error, since nothing was taken from anyone.
+
+## Doctrine checks — twelve performed
 
 | Sabotage | Result |
 |---|---|
@@ -102,8 +110,10 @@ Verified before being trusted: the flat dispatcher must produce **exactly** the 
 | Privilege check's domain condition inverted (`Domain::Kernel` instead of `Domain::Guest`) | **4 of 69 failed** — the same four, this time for the opposite reason: `Domain::Kernel` was wrongly blocked and `Domain::Guest` wrongly let through |
 | `ConcurrentTracker::blocking_acquire`'s wait removed (`Blocked` treated as `Granted`) | **3 tests failed across two crates** — the timing test returned in microseconds instead of waiting out the real hold; the real-threads deadlock test found no cycle at all (no wait ever recorded); the language-level mutual-exclusion test observed real cross-thread interleaving corruption |
 | `ResourceTracker::resources_held_by` returns nothing | **1 failed** — `two_real_threads_deadlock_and_the_watchdog_resolves_it`'s own `released must not be empty` assertion, caught before either thread could be joined |
+| `Sandbox::off_limits_for`'s ownership filter inverted (`==` instead of `!=`) | **3 of 78 failed** — every isolation test: `a_tenant_can_freely_use_its_own_admitted_memory` (now refused its own memory), `a_tenant_cannot_touch_another_tenants_memory` (now let through), `tenants_run_concurrently_and_stay_isolated_under_real_contention` (panicked looking up its own declared task, since its own store was wrongly refused) |
+| `Sandbox::admit`'s conflict check removed entirely | **2 of 78 failed** — `admitting_a_tenant_to_an_already_kernel_owned_cell_is_refused` and `admitting_two_different_tenants_to_the_same_cell_is_refused`, both `unwrap_err()` on an `Ok` |
 
-All ten reverted after confirming; full suite re-confirmed at 72/72, 453/453 workspace-wide.
+All twelve reverted after confirming; full suite re-confirmed at 78/78, 460/460 workspace-wide.
 
 ## Three findings worth carrying
 
@@ -133,6 +143,7 @@ Also absent, and each for a stated reason:
 - **`vm::Vm` itself still has no scheduler.** `Vm::run_batch` remains sequential by design; real concurrency lives in the separate `concurrent` module (see Slice 4 above), not inside `Vm`.
 - **Deadlock resolution inside `concurrent`.** It detects (via the unchanged `WaitForGraph`) but never resolves a cycle — resolution stays application-level, demonstrated in `neos/src/main.rs`'s own watchdog, the identical boundary the sequential kernel demo already keeps.
 - **A derived privilege policy.** `vm::Domain`/`Vm::reserve_cells` (built — see above) are the enforcement *mechanism*; still absent, because no law defines it either, is any claim about what should be protected, how many domains beyond two are meaningful, or anything resembling a derived security model. The policy is left entirely to whatever host calls `reserve_cells`.
+- **Per-tenant resource namespacing.** `sandbox::Sandbox` (Slice 5) isolates memory ownership; `ResourceId`s stay a namespace shared across every tenant, stated plainly rather than hidden — see Slice 5 above.
 
 ## Do not
 

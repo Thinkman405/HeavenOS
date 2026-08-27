@@ -8,6 +8,7 @@ members = [
     "ftg",
     "gui",
     "crystallisation",
+    "media_ffi",
 ]
 
 # NEOS — New Earth Operating System

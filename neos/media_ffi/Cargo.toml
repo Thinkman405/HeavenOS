@@ -1,0 +1,19 @@
+[package]
+name = "media-ffi"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+description = "NEOS C FFI bridge: crystallisation's pipelines, exposed across a real C ABI boundary"
+
+[lib]
+name = "media_ffi"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+crystallisation = { path = "../crystallisation" }
+
+# Physics/FFI assertions live at neos/tests/ per this workspace's existing
+# convention for every other crate.
+[[test]]
+name = "media_ffi"
+path = "../tests/media_ffi.rs"

@@ -14,9 +14,14 @@ jobs:
 
     runs-on: ubuntu-latest
 
+    defaults:
+      run:
+        # The Cargo workspace lives in neos/, not the repo root.
+        working-directory: neos
+
     steps:
     - uses: actions/checkout@v4
     - name: Build
-      run: cargo build --verbose
+      run: cargo build --verbose --workspace
     - name: Run tests
-      run: cargo test --verbose
+      run: cargo test --verbose --workspace

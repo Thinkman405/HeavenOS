@@ -288,3 +288,47 @@ No behaviour changed for any caller: `crystallise_video`'s per-frame energy redu
 ## Human check
 
 Read `fft_matches_an_independent_direct_dft_at_power_of_two_sizes` alongside `parseval_holds`/`transform_round_trips` — the new test checks the actual numbers a second implementation independently computes; the older tests check properties an exact-but-differently-computed result would also satisfy. Both kinds of test are doing real work here, and neither substitutes for the other.
+
+---
+
+# Addendum — parallel media crystallization (`crystallisation::parallel`)
+
+```
+cargo build --workspace  → Finished, no warnings
+cargo test  --workspace  → 472 passed; 0 failed
+cargo test  -p crystallisation --test crystallisation_parallel → 5 passed
+```
+
+Workspace total: **467 → 472**. This crate's own test count: 62 → 67.
+
+## Checked before writing anything: is this actually safe with zero synchronisation?
+
+A grep across every file in `neos/crystallisation/src/` for `static `, `thread_local`, `OnceCell`, `lazy_static`, `RefCell`, `Cell<`, and `unsafe` returned nothing. Every pipeline — `holographic`, `timecrystal`'s `takens_embed`/`crystallise`/`crystallise_video`, `linguistic` — is a pure function or method over data the caller already owns or borrows. That is the actual justification for building `crystallisation::parallel` with no `Mutex`, no `Condvar`, no resource tracker at all: `symphony_lang::concurrent` and `symphony_kernel::ConcurrentPool`/`ConcurrentTracker` needed real synchronisation because their callers genuinely share mutable state across threads; nothing here does, so a real `std::thread::spawn` per job with no lock anywhere is not a shortcut, it is the correct amount of mechanism for what this crate actually has.
+
+## Three functions, one shape, no shared abstraction
+
+`crystallize_images(Vec<PixelGrid>) -> Vec<Result<[FaceProjection; 4], CrystalError>>`, `embed_audio(Vec<(Vec<f64>, usize)>) -> Vec<Result<Vec<PhaseSpaceVector>, CrystalError>>`, and `crystallize_videos(Vec<(Vec<PixelGrid>, f64, usize)>) -> Vec<Result<VolumetricTimeCrystal, CrystalError>>` are three near-identical functions — spawn one thread per job, join every handle in input order — rather than one generic batch function over a trait object or closure. Deliberate: the three pipelines have unrelated input/output types, and per this workspace's own stated discipline against premature abstraction, three similar ten-line functions are clearer than a generic layer built to serve exactly three call sites.
+
+## The real claim, and how it was tested
+
+Real concurrency here cannot change output — that is the whole point of "pure function, no shared state." So the tests split into two genuinely different concerns: *correctness* (parallel must equal sequential, exactly) and *concurrency* (it must also actually be faster, not just correct by accident because it silently runs one thread at a time).
+
+For correctness, every pipeline's parallel-vs-sequential comparison uses `assert_eq!` against a `PartialEq`-deriving result type — `FaceProjection`, `PhaseSpaceVector`, `VolumetricTimeCrystal`, and `CrystalError` all already derive it, so no new derive was needed anywhere in `holographic.rs`/`timecrystal.rs`. `parallel_image_crystallization_preserves_input_order_even_when_jobs_finish_out_of_order` is the sharper of the four correctness tests: it deliberately gives job 0 far more work than jobs 1-3 (a `90x90` non-power-of-two image against three `8x8` ones), so real threads cannot possibly all finish in input order — a naive implementation that collected results by *arrival* instead of by *input position* would pass every same-cost test in this file and fail only this one.
+
+For concurrency, `parallel_image_crystallization_is_genuinely_faster_than_sequential` needed a real, substantial per-job cost to measure against, found by profiling rather than guessed: `FrequencyMap::transform` at a non-power-of-two size lands on the exact `O(N^2)` fallback per axis (documented in the FFT addendum above), which turns out to be dramatic — `96x96` measured **321ms** against `128x128`'s **14.5ms**, despite being smaller, purely because 128 is a power of two and 96 is not. `48x48` was chosen as a size cheap enough to keep the test suite fast but costly enough (~150-250ms per job under this workspace's `opt-level = 1` test profile) to make thread-spawn overhead negligible by comparison. The bound itself (`parallel < 0.85 * sequential`) was set from six actual timing runs on the development machine (4 logical cores), which ranged `0.44`-`0.77` — generous margin in both directions, not a number chosen to make one lucky run pass.
+
+## Sabotage — one performed, sharply targeted
+
+| Sabotage | Result |
+|---|---|
+| `crystallize_images` reverses its `Vec<JoinHandle>` before collecting results | **2 of 5 failed** — the plain bit-for-bit test and the mixed-cost ordering test, both for the same real reason: output rows no longer lined up with their input position |
+
+Reverted after confirming; full suite re-confirmed at 5/5 in this file, 472/472 workspace-wide. Only one sabotage was needed here, unlike most of this workspace's other concurrency work, precisely because there is no shared-state boundary to attack — the entire correctness surface is "did the results come back matched to the right input," which the ordering test already isolates sharply.
+
+## Wired into the demo
+
+`neos/src/main.rs`'s crystallisation section — previously three sequential calls (decode+transform image, decode+embed audio, decode+crystallise video) — now spawns one real thread per pipeline directly (not through the batch functions above, since the demo's three media types are genuinely different, not a batch of one type) and joins all three before printing. Output is byte-for-byte unchanged, confirmed by running the binary before and after; only the execution shape changed, from sequential to three real concurrent threads.
+
+## Human check
+
+Read `parallel_image_crystallization_preserves_input_order_even_when_jobs_finish_out_of_order` alongside `parallel_image_crystallization_matches_sequential_bit_for_bit` — the second alone would pass even if results were collected by arrival order rather than input order, since same-size jobs give real threads no reason to finish in any particular sequence. The first is the one that actually forces the distinction.

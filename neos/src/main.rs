@@ -638,12 +638,47 @@ fn main() {
         Delivery::LinkLost { hop, .. } => println!("  link lost      at hop {hop}"),
     }
 
-    // ---- crystallisation: decode a real image ---------------------------
-    let grid = crystallisation::decode_ppm(&embedded_ppm()).expect("well-formed embedded PPM");
-    let faces = FrequencyMap::transform(&grid)
-        .project_onto_faces()
-        .expect("16 coefficients divide evenly across 4 faces");
-    println!("\ncrystallisation");
+    // ---- crystallisation: image, audio, and video, crystallised concurrently
+    //
+    // Three genuinely independent pipelines — nothing here shares state, so
+    // there is nothing to synchronise, only real throughput to gain. See
+    // `crystallisation::parallel`'s own module docs: every pipeline in that
+    // crate is a pure function over owned data, which is what makes this
+    // safe with zero locks. `crystallize_images`/`embed_audio`/
+    // `crystallize_videos` handle the general batch case (many of one media
+    // type); this demo's own three *different* media types are spawned
+    // directly, one real OS thread each.
+    let image_thread = thread::spawn(|| {
+        let grid = crystallisation::decode_ppm(&embedded_ppm()).expect("well-formed embedded PPM");
+        let faces = FrequencyMap::transform(&grid)
+            .project_onto_faces()
+            .expect("16 coefficients divide evenly across 4 faces");
+        (grid, faces)
+    });
+    let audio_thread = thread::spawn(|| {
+        let audio = crystallisation::decode_wav(&embedded_wav()).expect("well-formed embedded WAV");
+        let audio_nodes = takens_embed(audio.samples(), 3).expect("64 samples embed at tau=3");
+        (audio, audio_nodes)
+    });
+    let video_thread = thread::spawn(|| {
+        let video_frames = embedded_video_frames();
+        let frame_count = video_frames.len();
+        let vtc = VolumetricTimeCrystal::crystallise_video(video_frames, 30.0, 3)
+            .expect("rescaled embedded frames fit the quantisable ceiling");
+        (frame_count, vtc)
+    });
+
+    let (grid, faces) = image_thread
+        .join()
+        .expect("the image crystallization thread must not panic");
+    let (audio, audio_nodes) = audio_thread
+        .join()
+        .expect("the audio crystallization thread must not panic");
+    let (frame_count, vtc) = video_thread
+        .join()
+        .expect("the video crystallization thread must not panic");
+
+    println!("\ncrystallisation (image, audio, video — three real threads, not sequential)");
     println!(
         "  decoded        {}x{} image, {} bytes -> {} face(s)",
         grid.width(),
@@ -651,20 +686,12 @@ fn main() {
         grid.width() * grid.height(),
         faces.len()
     );
-
-    let audio = crystallisation::decode_wav(&embedded_wav()).expect("well-formed embedded WAV");
-    let audio_nodes = takens_embed(audio.samples(), 3).expect("64 samples embed at tau=3");
     println!(
         "  decoded        {} audio samples @ {} Hz -> {} phase-space node(s) (Takens tau=3)",
         audio.samples().len(),
         audio.sample_rate(),
         audio_nodes.len()
     );
-
-    let video_frames = embedded_video_frames();
-    let frame_count = video_frames.len();
-    let vtc = VolumetricTimeCrystal::crystallise_video(video_frames, 30.0, 3)
-        .expect("rescaled embedded frames fit the quantisable ceiling");
     println!(
         "  crystallised   {} video frames -> {} phase-space node(s), energy {:.4e} J, conserving: {}",
         frame_count,

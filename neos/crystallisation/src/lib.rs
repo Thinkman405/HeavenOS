@@ -32,6 +32,7 @@
 pub mod codec;
 pub mod holographic;
 pub mod linguistic;
+pub mod parallel;
 pub mod resonant;
 pub mod timecrystal;
 
@@ -152,6 +153,7 @@ impl std::error::Error for CrystalError {}
 pub use codec::{decode_ppm, decode_wav, AudioSamples};
 pub use holographic::{Complex, FaceProjection, FrequencyMap, PixelGrid};
 pub use linguistic::{Crystal, HarmonicNode};
+pub use parallel::{crystallize_images, crystallize_videos, embed_audio};
 pub use resonant::ResonantChamber;
 pub use timecrystal::{
     takens_embed, LorentzTransform, Mode, PhaseSpaceVector, TetryenRecurrence,

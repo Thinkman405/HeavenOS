@@ -26,3 +26,7 @@ path = "../tests/crystallisation_timecrystal.rs"
 [[test]]
 name = "crystallisation_codec"
 path = "../tests/crystallisation_codec.rs"
+
+[[test]]
+name = "crystallisation_parallel"
+path = "../tests/crystallisation_parallel.rs"

@@ -12,6 +12,7 @@ a Rust substrate driven by a quantized harmonic kernel.
 [![Subsystems](https://img.shields.io/badge/subsystems-7%2F7%20complete-6C5CE7?style=for-the-badge)](#subsystems)
 [![Doctrine](https://img.shields.io/badge/doctrine-physics--TDD-00B4D8?style=for-the-badge)](#the-doctrine)
 [![Status](https://img.shields.io/badge/status-active-2D3142?style=for-the-badge)](#status)
+[![License](https://img.shields.io/badge/license-all%20rights%20reserved-FF6B6B?style=for-the-badge)](LICENSE)
 
 </div>
 
@@ -32,6 +33,7 @@ a Rust substrate driven by a quantized harmonic kernel.
 - [Quickstart](#quickstart)
 - [What `cargo run` actually does](#what-cargo-run-actually-does)
 - [Status](#status)
+- [License](#license)
 
 <br>
 
@@ -187,6 +189,13 @@ python _system/status.py --check
 This reads every stage's real output on disk, runs every test suite, checks every law-ledger row
 against `_mkb/`, and audits wikilinks, relative links, and file encodings — exiting non-zero if
 anything is inconsistent. It is the only source of truth this workspace trusts about itself.
+
+<br>
+
+## License
+
+All rights reserved — see [`LICENSE`](LICENSE). No reuse, redistribution, or modification is
+granted without prior written permission from the copyright holder.
 
 <br>
 

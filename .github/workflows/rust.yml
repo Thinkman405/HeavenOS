@@ -21,6 +21,20 @@ jobs:
 
     steps:
     - uses: actions/checkout@v4
+    - name: Check LICENSE
+      # Overrides the job-level default above: LICENSE and README.md live
+      # at the repo root, not inside neos/.
+      working-directory: ${{ github.workspace }}
+      run: |
+        if [ ! -f LICENSE ]; then
+          echo "::error::LICENSE file is missing from the repository root"
+          exit 1
+        fi
+        if ! grep -q "LICENSE" README.md; then
+          echo "::error::README.md does not reference the LICENSE file"
+          exit 1
+        fi
+        echo "LICENSE present and referenced in README.md"
     - name: Build
       run: cargo build --verbose --workspace
     - name: Run tests
